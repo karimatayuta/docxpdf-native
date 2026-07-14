@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-15",
+  "documents": [
+    {
+      "id": "open_data_guideline",
+      "title": "オープンデータ基本指針",
+      "revision": "令和6年7月5日改正",
+      "publication_date": "2024-07-05",
+      "listing_url": "https://www.digital.go.jp/resources/open_data",
+      "oracle_valid": true,
+      "oracle_validation_notes": "公式ページ上の対、版表記、本文指紋、ページ数が整合する。脚注を含むため全文ハッシュは一致しないが、差分はPDFの読み順と脚注マーカーで説明でき、同一改正版の参照PDFとして扱える。",
+      "same_revision_evidence": [
+        "公式掲載ページでDOCXとPDFが同じ『オープンデータ基本指針』の『本文』として併記されている。",
+        "両ファイル名が20240705を含み、DOCX内とPDF内の表題および令和6年7月5日改正の履歴が一致する。",
+        "独立抽出した正規化テキストの冒頭と末尾が一致し、5文字ngramのDOCX側再現率は0.967465、PDF側適合率は0.944179である。差分の主因はPDF抽出時の脚注番号とページ境界での本文・脚注順序である。",
+        "DOCXのapp.xmlのPages値と参照PDFの実測ページ数がともに7である。"
+      ],
+      "source": {
+        "path": "data/source/open_data_guideline.docx",
+        "url": "https://www.digital.go.jp/assets/contents/node/basic_page/field_ref_resources/f7fde41d-ffca-4b2a-9b25-94b8a701a037/d60bffd4/20240705_resources_data_guideline_02.docx",
+        "byte_size": 72654,
+        "sha256": "f669a53ee822c2c182b9c9f2a95fa5ff726c541a2b8914c5c80cb6d812c5bae3",
+        "retrieved_on": "2026-07-15",
+        "http_last_modified": "Wed, 28 Aug 2024 04:54:45 GMT",
+        "docx_metadata_pages": 7,
+        "text_normalization": "Unicode NFC, then remove all Unicode whitespace",
+        "text_character_count": 7263,
+        "text_fingerprint_sha256": "16946c8250b6f81db05357d153d605a8d335fc6bc663aed74f2994e522764d87",
+        "opening_text": "オープンデータ基本指針平成29年５月30日高度情報通信ネットワーク社会推進戦略本部・官民データ活用推進戦略会議決定令和元年６月７日改正令和３年６月15日改正令和６年７月５日改正デジタル社会推進",
+        "closing_text": "令和３年４月27日）では、「公的資金による論文のエビデンスとしての研究データは原則公開とし、その他研究開発の成果としての研究データについても可能な範囲で公開することが望ましい。」とされている。"
+      },
+      "reference": {
+        "path": "data/reference/open_data_guideline.pdf",
+        "url": "https://www.digital.go.jp/assets/contents/node/basic_page/field_ref_resources/f7fde41d-ffca-4b2a-9b25-94b8a701a037/f1e42cee/20240705_resources_data_guideline_01.pdf",
+        "byte_size": 356371,
+        "sha256": "8392cb4103f5ef43e8cc74bc352a5d5d35a0186814ba30cbd3d031b11f52e1a0",
+        "retrieved_on": "2026-07-15",
+        "http_last_modified": "Wed, 28 Aug 2024 04:54:05 GMT",
+        "pdf_pages": 7,
+        "text_normalization": "Unicode NFC, then remove all Unicode whitespace",
+        "text_character_count": 7351,
+        "text_fingerprint_sha256": "9c16531feb99b6f4d899e0fcaf3cc61506e4b6fa22f98082fa7e30c70f207ab4",
+        "opening_text": "オープンデータ基本指針平成29年５月30日高度情報通信ネットワーク社会推進戦略本部・官民データ活用推進戦略会議決定令和元年６月７日改正令和３年６月15日改正令和６年７月５日改正デジタル社会推進",
+        "closing_text": "令和３年４月27日）では、「公的資金による論文のエビデンスとしての研究データは原則公開とし、その他研究開発の成果としての研究データについても可能な範囲で公開することが望ましい。」とされている。"
+      }
+    },
+    {
+      "id": "public_data_license_v1",
+      "title": "公共データ利用規約（第1.0版）",
+      "revision": "第1.0版",
+      "publication_date": "2024-07-05",
+      "listing_url": "https://www.digital.go.jp/resources/open_data",
+      "oracle_valid": true,
+      "oracle_validation_notes": "公式ページ上の対であり、独立抽出した正規化全文が完全一致する。app.xmlのPages値だけは参照PDFの実ページ数と一致せず、ページ数の正解には使わない。",
+      "same_revision_evidence": [
+        "公式掲載ページでDOCXとPDFが同じ『公共データ利用規約（第1.0版）』本体の配布形式として併記されている。",
+        "DOCXとPDFのHTTP Last-Modifiedが秒単位で一致し、両ファイル名が20240705を含む。",
+        "独立抽出した全文をUnicode NFC化して空白を除くと、文字数3298とSHA-256が完全一致する。",
+        "DOCXのapp.xmlのPages値は1だが参照PDFは3ページであり、このメタデータ値は古いと判断できる。本文の版一致には影響しない。"
+      ],
+      "source": {
+        "path": "data/source/public_data_license_v1.docx",
+        "url": "https://www.digital.go.jp/assets/contents/node/basic_page/field_ref_resources/f7fde41d-ffca-4b2a-9b25-94b8a701a037/41722b25/20240705_resources_data_outline_06.docx",
+        "byte_size": 37920,
+        "sha256": "a628977cdce9ab6ab12a927738770518d8f721c8c134bba524e174a1f96dd2c0",
+        "retrieved_on": "2026-07-15",
+        "http_last_modified": "Tue, 02 Jul 2024 05:51:49 GMT",
+        "docx_metadata_pages": 1,
+        "text_normalization": "Unicode NFC, then remove all Unicode whitespace",
+        "text_character_count": 3298,
+        "text_fingerprint_sha256": "2980beb74f06fb8160bd777488da5ac05bda9fde9aeb5e9a7e1f04cd3018f062",
+        "opening_text": "「公共データ利用規約（第1.0版）」注：下線部分は記載例であり、本規約の採用者（国、地方公共団体など）が別に「公共データ利用規約（第1.0版）に関する重要情報」を提示することで変更可能な箇所国",
+        "closing_text": "用規約（第1.0版）」は「PDL1.0」と表記することがあります（利用者もそのように表記することも可能です。）。なお、PDLは「PublicDataLicense」の頭文字から取ったものです。"
+      },
+      "reference": {
+        "path": "data/reference/public_data_license_v1.pdf",
+        "url": "https://www.digital.go.jp/assets/contents/node/basic_page/field_ref_resources/f7fde41d-ffca-4b2a-9b25-94b8a701a037/24afdf33/20240705_resources_data_outline_05.pdf",
+        "byte_size": 207095,
+        "sha256": "48153b4bf7130d07ff58ec620d05f24d8402a0a5c18f1583287cfe8ea93f3a5a",
+        "retrieved_on": "2026-07-15",
+        "http_last_modified": "Tue, 02 Jul 2024 05:51:49 GMT",
+        "pdf_pages": 3,
+        "text_normalization": "Unicode NFC, then remove all Unicode whitespace",
+        "text_character_count": 3298,
+        "text_fingerprint_sha256": "2980beb74f06fb8160bd777488da5ac05bda9fde9aeb5e9a7e1f04cd3018f062",
+        "opening_text": "「公共データ利用規約（第1.0版）」注：下線部分は記載例であり、本規約の採用者（国、地方公共団体など）が別に「公共データ利用規約（第1.0版）に関する重要情報」を提示することで変更可能な箇所国",
+        "closing_text": "用規約（第1.0版）」は「PDL1.0」と表記することがあります（利用者もそのように表記することも可能です。）。なお、PDLは「PublicDataLicense」の頭文字から取ったものです。"
+      }
+    },
+    {
+      "id": "public_data_license_commentary",
+      "title": "「公共データ利用規約（第1.0版）」の解説",
+      "revision": "第1.0版解説",
+      "publication_date": "2024-07-05",
+      "listing_url": "https://www.digital.go.jp/resources/open_data",
+      "oracle_valid": true,
+      "oracle_validation_notes": "公式ページ上の対であり、表題、日付、ページ数、ほぼ全文が整合する。1文字差はPDFテキスト抽出時の箇条書き記号であり、同一版の参照PDFとして扱える。",
+      "same_revision_evidence": [
+        "公式掲載ページでDOCXとPDFが同じ『公共データ利用規約（第1.0版）』解説の配布形式として併記されている。",
+        "両ファイル名が20240705を含み、DOCX内とPDF内の表題、令和6年7月5日、デジタル庁の表示が一致する。",
+        "独立抽出した正規化全文はPDF側に中点『・』が1文字多いだけで、SequenceMatcher比は0.999957、冒頭と末尾は一致する。",
+        "DOCXのapp.xmlのPages値と参照PDFの実測ページ数がともに12である。"
+      ],
+      "source": {
+        "path": "data/source/public_data_license_commentary.docx",
+        "url": "https://www.digital.go.jp/assets/contents/node/basic_page/field_ref_resources/f7fde41d-ffca-4b2a-9b25-94b8a701a037/da0dcfc3/20240705_resources_data_outline_08.docx",
+        "byte_size": 62261,
+        "sha256": "1629e3334ed0e8649e3c482f5efe1f1673816edfc2463b120a947f2e74e77119",
+        "retrieved_on": "2026-07-15",
+        "http_last_modified": "Fri, 20 Sep 2024 08:33:09 GMT",
+        "docx_metadata_pages": 12,
+        "text_normalization": "Unicode NFC, then remove all Unicode whitespace",
+        "text_character_count": 11672,
+        "text_fingerprint_sha256": "769c526a9435a7352e56c54035500cb710c98d94505515bc06fe930b07e9063c",
+        "opening_text": "「公共データ利用規約（第1.0版）」の解説令和６年７月５日デジタル庁＜全体の構成、基本的考え方について＞「公共データ利用規約（第1.0版）」の前身である「政府標準利用規約」は、各府省ウェブサイ",
+        "closing_text": "コンテンツについて以下のコンテンツについては、本利用ルールの適用外、もしくは別の利用ルールが適用されています。ア適用外のコンテンツ例：●イ別の利用ルールが適用されているコンテンツ例：●（以上）"
+      },
+      "reference": {
+        "path": "data/reference/public_data_license_commentary.pdf",
+        "url": "https://www.digital.go.jp/assets/contents/node/basic_page/field_ref_resources/f7fde41d-ffca-4b2a-9b25-94b8a701a037/b44a7e0c/20240705_resources_data_outline_07.pdf",
+        "byte_size": 215852,
+        "sha256": "7b6157cb8a0536b36bc44ede57741056cedbd2b1d70303aa5a1f06f6dbfb2a56",
+        "retrieved_on": "2026-07-15",
+        "http_last_modified": "Fri, 20 Sep 2024 08:32:38 GMT",
+        "pdf_pages": 12,
+        "text_normalization": "Unicode NFC, then remove all Unicode whitespace",
+        "text_character_count": 11673,
+        "text_fingerprint_sha256": "9e7a96a5b2b225e20b86ff52c6810ded559298b90197fd54d0e76f6c82cb5069",
+        "opening_text": "「公共データ利用規約（第1.0版）」の解説令和６年７月５日デジタル庁＜全体の構成、基本的考え方について＞「公共データ利用規約（第1.0版）」の前身である「政府標準利用規約」は、各府省ウェブサイ",
+        "closing_text": "コンテンツについて以下のコンテンツについては、本利用ルールの適用外、もしくは別の利用ルールが適用されています。ア適用外のコンテンツ例：●イ別の利用ルールが適用されているコンテンツ例：●（以上）"
+      }
+    }
+  ]
+}

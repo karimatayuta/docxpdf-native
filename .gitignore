@@ -1,0 +1,28 @@
+.venv/
+.coverage
+.coverage.*
+coverage.xml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+htmlcov/
+tmp/pdfs/
+output/pdf/
+benchmark/results/
+
+# OS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+
+# Env
+.env
+.env.*

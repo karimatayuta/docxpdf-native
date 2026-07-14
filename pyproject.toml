@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docxpdf-native"
+version = "0.1.0"
+description = "Deterministic, native DOCX to PDF conversion for a documented OOXML subset"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "docxpdf-native contributors" }]
+dependencies = [
+  "fonttools>=4.55",
+  "pydantic>=2.10",
+  "reportlab>=4.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.14",
+  "pypdf>=5.1",
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.9",
+]
+
+[project.scripts]
+docxpdf-native = "docxpdf_native.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/docxpdf_native"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["docxpdf_native"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "@abstractmethod",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["B024"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+"tests/integration/test_converter_contract.py" = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["reportlab.*", "fontTools.*"]
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+  "mypy>=1.14",
+  "pypdf>=5.1",
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.9",
+]
