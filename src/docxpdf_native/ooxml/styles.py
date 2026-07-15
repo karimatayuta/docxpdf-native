@@ -343,13 +343,19 @@ class ThemeFontResolver:
         if not major and not minor:
             return value
 
+        latin = theme.major_latin if major else theme.minor_latin
         if "eastasia" in key or east_asia:
             selected = theme.major_east_asia if major else theme.minor_east_asia
         elif "bidi" in key or key.endswith("cs"):
             selected = theme.major_complex_script if major else theme.minor_complex_script
         else:
-            selected = theme.major_latin if major else theme.minor_latin
-        return selected or value
+            selected = latin
+        # Word falls back to the scheme's Latin face whenever the east-Asian
+        # or complex-script slot is left unspecified (an empty
+        # ``<a:cs typeface=""/>``, or the element missing entirely) -- it
+        # never leaves the "+major*"/"+minor*" placeholder itself as the
+        # resolved font name, which would otherwise never match a real font.
+        return selected or latin
 
 
 class OoxmlStyleResolver:

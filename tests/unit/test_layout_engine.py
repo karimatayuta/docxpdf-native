@@ -11,6 +11,8 @@ from docxpdf_native.models import (
     HeaderFooterModel,
     ImageModel,
     ParagraphModel,
+    ParagraphProperties,
+    PlaceholderModel,
     ResolvedDocumentModel,
     ResolvedFont,
     ResolvedParagraphModel,
@@ -146,6 +148,109 @@ def test_layout_engine_stacks_paragraphs_without_overlap() -> None:
 
     first, second = layout.pages[0].body
     assert second.y >= first.y + first.height
+
+
+def test_layout_engine_collapses_paragraph_spacing_when_after_exceeds_before() -> None:
+    # Word does not sum a paragraph's space_after with the next paragraph's
+    # space_before -- only the larger of the two applies. Here after (20) >
+    # before (10), so the second paragraph's own space_before contributes
+    # nothing extra: its text starts right where the first paragraph ends.
+    first = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="line", font_name="Helvetica", font_size=12),),
+        space_after=20,
+        source_index=0,
+    )
+    second = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="line", font_name="Helvetica", font_size=12),),
+        space_before=10,
+        source_index=1,
+    )
+    document = ResolvedDocumentModel(
+        sections=(SectionModel(),),
+        paragraphs=(first, second),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    first_box, second_box = layout.pages[0].body
+    # first_box.height = 0 (before) + 12 (line) + 20 (after)
+    assert first_box.height == 32.0  # type: ignore[union-attr]
+    assert second_box.lines[0].y == first_box.y + first_box.height  # type: ignore[union-attr]
+
+
+def test_layout_engine_uses_larger_space_before_when_it_exceeds_previous_after() -> None:
+    # Here before (15) > after (5), so only the uncovered remainder (10)
+    # of the second paragraph's space_before is added after the first
+    # paragraph's box (which already contributes its own space_after).
+    first = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="line", font_name="Helvetica", font_size=12),),
+        space_after=5,
+        source_index=0,
+    )
+    second = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="line", font_name="Helvetica", font_size=12),),
+        space_before=15,
+        source_index=1,
+    )
+    document = ResolvedDocumentModel(
+        sections=(SectionModel(),),
+        paragraphs=(first, second),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    first_box, second_box = layout.pages[0].body
+    assert second_box.lines[0].y == first_box.y + first_box.height + 10  # type: ignore[union-attr]
+
+
+def test_layout_engine_resets_paragraph_spacing_collapse_across_a_table() -> None:
+    first = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="line", font_name="Helvetica", font_size=12),),
+        space_after=20,
+        source_index=0,
+    )
+    table = TableModel(
+        grid_widths=(80,),
+        rows=(TableRowModel(cells=(TableCellModel(),)),),
+        source_index=1,
+    )
+    second = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="line", font_name="Helvetica", font_size=12),),
+        space_before=10,
+        source_index=2,
+    )
+    document = ResolvedDocumentModel(
+        sections=(ResolvedSectionModel(blocks=(first, table, second)),),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    _, table_box, second_box = layout.pages[0].body
+    # The table does not participate in spacing collapse, so the paragraph
+    # after it keeps its full space_before.
+    assert second_box.lines[0].y == table_box.y + table_box.height + 10  # type: ignore[union-attr]
+
+
+def test_layout_engine_collapses_paragraph_spacing_in_table_cells() -> None:
+    first = ParagraphModel(
+        runs=(RunModel(text="line"),),
+        properties=ParagraphProperties(space_after=20),
+    )
+    second = ParagraphModel(
+        runs=(RunModel(text="line"),),
+        properties=ParagraphProperties(space_before=10),
+    )
+    table = TableModel(
+        grid_widths=(80,),
+        rows=(TableRowModel(cells=(TableCellModel(paragraphs=(first, second)),)),),
+    )
+    document = ResolvedDocumentModel(sections=(ResolvedSectionModel(blocks=(table,)),))
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    cell = layout.pages[0].body[0].cells[0]  # type: ignore[union-attr]
+    first_box, second_box = cell.blocks
+    assert second_box.lines[0].y == first_box.y + first_box.height  # type: ignore[union-attr]
 
 
 def test_layout_engine_paginates_complete_paragraphs() -> None:
@@ -655,6 +760,30 @@ def test_layout_engine_scales_inline_image_to_body_width() -> None:
     assert (fragment.width, fragment.height) == (60.0, 30.0)
 
 
+def test_layout_engine_scales_placeholder_to_body_width_and_preserves_label() -> None:
+    placeholder = PlaceholderModel(label="[Embedded Object]", width=100, height=50)
+    paragraph = ResolvedParagraphModel(runs=(ResolvedRunModel(placeholder=placeholder),))
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(paragraph,),
+                page_width=80,
+                page_height=100,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    fragment = layout.pages[0].body[0].lines[0].fragments[0]  # type: ignore[union-attr]
+    assert (fragment.width, fragment.height) == (60.0, 30.0)
+    assert fragment.label == "[Embedded Object]"  # type: ignore[union-attr]
+
+
 def test_layout_engine_advances_tab_to_next_default_stop() -> None:
     paragraph = ResolvedParagraphModel(
         runs=(
@@ -903,7 +1032,12 @@ def test_layout_engine_repositions_image_before_resolved_page_field() -> None:
     ) == ("image", "1", 20.0)
 
 
-def test_layout_engine_moves_and_splits_table_after_paragraph() -> None:
+def test_layout_engine_fills_remaining_page_room_before_splitting_table() -> None:
+    # body.height is 50; the paragraph takes 11pt, leaving 39pt. Word's
+    # default lets a row split across pages, so the table starts right where
+    # the paragraph left off, row 0 (20pt) fits whole, and row 1 (20pt) is
+    # split to use up the rest of the remaining room (19pt) rather than
+    # moving whole to a fresh page.
     paragraph = ResolvedParagraphModel(runs=(ResolvedRunModel(text="before"),))
     table = TableModel(
         grid_widths=(80,),
@@ -933,10 +1067,190 @@ def test_layout_engine_moves_and_splits_table_after_paragraph() -> None:
     layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
 
     assert tuple(tuple(block.kind for block in page.body) for page in layout.pages) == (
+        ("paragraph", "table"),
+        ("table",),
+    )
+    assert [warning.code for warning in layout.warnings] == ["table_row_split"]
+    first_page_table = layout.pages[0].body[1]
+    assert first_page_table.height == 39.0  # type: ignore[union-attr]
+    assert [cell.row_index for cell in first_page_table.cells] == [0, 1]  # type: ignore[union-attr]
+    second_page_table = layout.pages[1].body[0]
+    assert [cell.row_index for cell in second_page_table.cells] == [2, 3]  # type: ignore[union-attr]
+
+
+def test_layout_engine_abandons_cramped_table_start_without_overlapping_content() -> None:
+    # Regression test for a bug found while implementing the "fill remaining
+    # room" behaviour above: when a table starts mid-page but even its first
+    # (header) row doesn't fit the sliver of room left over -- though it
+    # would fit a fresh page -- that row must be anchored to the fresh
+    # page's top, not to the cramped mid-page position. The bug placed it at
+    # the stale mid-page y, causing it to visually overflow past the page
+    # boundary and overlap whatever came next.
+    filler = ResolvedParagraphModel(runs=(ResolvedRunModel(text="x"),), space_after=35.0)
+    header = TableRowModel(
+        cells=(TableCellModel(paragraphs=(ParagraphModel(runs=(RunModel(text="H"),)),)),),
+        height=10,
+        height_rule="exact",
+        repeat_header=True,
+    )
+    data_rows = tuple(
+        TableRowModel(
+            cells=(TableCellModel(paragraphs=(ParagraphModel(runs=(RunModel(text=f"D{i}"),)),)),),
+            height=20,
+            height_rule="exact",
+        )
+        for i in range(3)
+    )
+    table = TableModel(grid_widths=(80,), rows=(header, *data_rows))
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(filler, table),
+                page_width=100,
+                page_height=70,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    # Only ~4pt is left after the filler paragraph -- not enough for even
+    # the 10pt header row -- so the whole table must move to a fresh page.
+    assert tuple(tuple(block.kind for block in page.body) for page in layout.pages) == (
         ("paragraph",),
         ("table",),
         ("table",),
     )
+    for page in layout.pages[1:]:
+        table_box = page.body[0]
+        assert table_box.y == 10.0  # type: ignore[union-attr]
+        for cell in table_box.cells:  # type: ignore[union-attr]
+            assert cell.y >= table_box.y  # type: ignore[union-attr]
+            assert cell.y + cell.height <= table_box.y + table_box.height + 1e-6  # type: ignore[union-attr]
+
+
+def test_layout_engine_moves_table_with_vertical_merge_whole_to_fresh_page() -> None:
+    # A table containing a vertically merged cell is kept on the old, safe
+    # path of moving whole to a fresh page when it doesn't fit the current
+    # page's remainder -- starting it mid-page risks a merge boundary
+    # landing on a chunk split, which _split_table_box cannot represent.
+    paragraph = ResolvedParagraphModel(runs=(ResolvedRunModel(text="before"),))
+    table = TableModel(
+        grid_widths=(80,),
+        rows=(
+            TableRowModel(
+                cells=(TableCellModel(paragraphs=(ParagraphModel(),), vertical_merge="restart"),),
+                height=20,
+                height_rule="exact",
+            ),
+            TableRowModel(
+                cells=(TableCellModel(vertical_merge="continue"),),
+                height=20,
+                height_rule="exact",
+            ),
+            TableRowModel(
+                cells=(TableCellModel(paragraphs=(ParagraphModel(),)),),
+                height=20,
+                height_rule="exact",
+            ),
+        ),
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(paragraph, table),
+                page_width=100,
+                page_height=70,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    # 39pt remain after the paragraph -- enough for the merged rows (40pt)
+    # to fit if the table were allowed to start mid-page, but the table
+    # must still move whole to a fresh page because it contains a merge.
+    assert tuple(tuple(block.kind for block in page.body) for page in layout.pages) == (
+        ("paragraph",),
+        ("table",),
+        ("table",),
+    )
+
+
+def test_layout_engine_splits_row_at_remaining_room_before_trying_a_fresh_page() -> None:
+    # Word's default ("allow row to break across pages") splits an
+    # oversized row at whatever room is left on the current page, rather
+    # than moving it whole to a fresh page first. Here the row (9
+    # paragraphs, 99pt) would fit a fresh 110pt body on its own, but must
+    # still be split at the 90pt left after the filler paragraph instead of
+    # being moved whole to page 2.
+    filler = ResolvedParagraphModel(runs=(ResolvedRunModel(text="x"),), space_after=9.0)
+    row = TableRowModel(cells=(TableCellModel(paragraphs=_paragraphs(9)),))
+    table = TableModel(grid_widths=(100,), rows=(row,))
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(filler, table),
+                page_width=140,
+                page_height=130,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.page_count == 2
+    assert [warning.code for warning in layout.warnings] == ["table_row_split"]
+    first_page_table = layout.pages[0].body[1]
+    assert first_page_table.height == 90.0  # type: ignore[union-attr]
+    second_page_table = layout.pages[1].body[0]
+    assert second_page_table.height == 9.0  # type: ignore[union-attr]
+
+
+def test_layout_engine_moves_cant_split_row_to_fresh_page_instead_of_splitting_it() -> None:
+    # A cantSplit row must still move whole to a fresh page rather than
+    # being cut at the room remaining on the current page, even though a
+    # splittable row in the same spot would be split there instead (see
+    # test_layout_engine_splits_row_at_remaining_room_before_trying_a_fresh_page).
+    filler = ResolvedParagraphModel(runs=(ResolvedRunModel(text="x"),), space_after=9.0)
+    row = TableRowModel(cells=(TableCellModel(paragraphs=_paragraphs(9)),), cant_split=True)
+    table = TableModel(grid_widths=(100,), rows=(row,))
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(filler, table),
+                page_width=140,
+                page_height=130,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.page_count == 2
+    assert layout.warnings == ()
+    assert tuple(tuple(block.kind for block in page.body) for page in layout.pages) == (
+        ("paragraph",),
+        ("table",),
+    )
+    table_box = layout.pages[1].body[0]
+    assert table_box.height == 99.0  # type: ignore[union-attr]
 
 
 def test_layout_engine_honors_page_break_before_in_mixed_section() -> None:
@@ -1082,7 +1396,10 @@ def test_layout_engine_rejects_keep_lines_paragraph_taller_than_mixed_page() -> 
         NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
 
 
-def test_layout_engine_rejects_table_row_taller_than_page_body() -> None:
+def test_layout_engine_overflows_table_row_taller_than_page_body_when_content_is_atomic() -> None:
+    # An empty (content-less) row cannot be split, so it is placed whole and
+    # allowed to overflow instead of raising -- conversions must never fail
+    # just because one row is taller than the page.
     table = TableModel(
         rows=(
             TableRowModel(
@@ -1103,11 +1420,16 @@ def test_layout_engine_rejects_table_row_taller_than_page_body() -> None:
         ),
     )
 
-    with pytest.raises(LayoutError, match=r"table\[0\]/row\[0\]"):
-        NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.page_count == 1
+    assert [warning.code for warning in layout.warnings] == ["table_row_overflow"]
 
 
-def test_layout_engine_rejects_data_row_that_cannot_fit_below_repeated_header() -> None:
+def test_layout_engine_drops_repeated_header_when_data_row_cannot_fit_below_it() -> None:
+    # The data row fits a fresh page on its own (30 <= 50) but not once the
+    # repeated header (30) is subtracted from the 50pt body. Rather than
+    # failing, the header repeat is skipped for that one page.
     table = TableModel(
         rows=(
             TableRowModel(
@@ -1134,8 +1456,202 @@ def test_layout_engine_rejects_data_row_that_cannot_fit_below_repeated_header() 
         ),
     )
 
-    with pytest.raises(LayoutError, match="below repeated header"):
-        NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.page_count == 2
+    assert [block.kind for block in layout.pages[0].body] == ["table"]
+    assert [block.kind for block in layout.pages[1].body] == ["table"]
+    assert layout.warnings == ()
+
+
+def _paragraphs(count: int) -> tuple[ParagraphModel, ...]:
+    return tuple(ParagraphModel(runs=(RunModel(text=f"l{index}"),)) for index in range(count))
+
+
+def test_layout_engine_splits_table_row_across_two_pages() -> None:
+    # Each paragraph lays out as one 11pt line with this measurer/font size,
+    # so 20 paragraphs need 220pt -- exactly two 110pt page bodies.
+    table = TableModel(
+        grid_widths=(100,),
+        rows=(TableRowModel(cells=(TableCellModel(paragraphs=_paragraphs(20)),)),),
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(table,),
+                page_width=140,
+                page_height=130,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.page_count == 2
+    assert [warning.code for warning in layout.warnings] == ["table_row_split"]
+    first, second = (page.body[0] for page in layout.pages)
+    assert (first.continued_from_previous_page, first.continues_on_next_page) == (False, True)  # type: ignore[union-attr]
+    assert (second.continued_from_previous_page, second.continues_on_next_page) == (True, False)  # type: ignore[union-attr]
+    assert len(first.cells[0].blocks) == 10  # type: ignore[union-attr]
+    assert len(second.cells[0].blocks) == 10  # type: ignore[union-attr]
+    first_texts = [
+        fragment.text
+        for block in first.cells[0].blocks  # type: ignore[union-attr]
+        for line in block.lines
+        for fragment in line.fragments
+    ]
+    second_texts = [
+        fragment.text
+        for block in second.cells[0].blocks  # type: ignore[union-attr]
+        for line in block.lines
+        for fragment in line.fragments
+    ]
+    assert first_texts == [f"l{index}" for index in range(10)]
+    assert second_texts == [f"l{index}" for index in range(10, 20)]
+
+
+def test_layout_engine_splits_table_row_across_three_or_more_pages() -> None:
+    # 30 paragraphs at 11pt need 330pt -- exactly three 110pt page bodies.
+    table = TableModel(
+        grid_widths=(100,),
+        rows=(TableRowModel(cells=(TableCellModel(paragraphs=_paragraphs(30)),)),),
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(table,),
+                page_width=140,
+                page_height=130,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.page_count == 3
+    assert [warning.code for warning in layout.warnings] == ["table_row_split", "table_row_split"]
+    boxes = [page.body[0] for page in layout.pages]
+    assert [b.continued_from_previous_page for b in boxes] == [False, True, True]  # type: ignore[union-attr]
+    assert [b.continues_on_next_page for b in boxes] == [True, True, False]  # type: ignore[union-attr]
+    assert [len(b.cells[0].blocks) for b in boxes] == [10, 10, 10]  # type: ignore[union-attr]
+
+
+def test_layout_engine_keeps_cant_split_row_whole_when_it_fits_a_fresh_page() -> None:
+    # The second row is marked cantSplit and fits a fresh 110pt page body on
+    # its own (110pt); it must move to the next page whole, never split.
+    rows = (
+        TableRowModel(cells=(TableCellModel(paragraphs=_paragraphs(1)),)),
+        TableRowModel(cells=(TableCellModel(paragraphs=_paragraphs(10)),), cant_split=True),
+    )
+    table = TableModel(grid_widths=(100,), rows=rows)
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(table,),
+                page_width=140,
+                page_height=130,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.page_count == 2
+    assert layout.warnings == ()
+    assert [cell.row_index for cell in layout.pages[0].body[0].cells] == [0]  # type: ignore[union-attr]
+    assert [cell.row_index for cell in layout.pages[1].body[0].cells] == [1]  # type: ignore[union-attr]
+
+
+def test_layout_engine_splits_cant_split_row_when_taller_than_page_body() -> None:
+    # cantSplit only protects a row that could fit a page on its own; once a
+    # single row is taller than the whole body (220pt > 110pt) Word ends up
+    # splitting it too, so we must fall back to splitting instead of failing.
+    table = TableModel(
+        grid_widths=(100,),
+        rows=(
+            TableRowModel(
+                cells=(TableCellModel(paragraphs=_paragraphs(20)),),
+                cant_split=True,
+            ),
+        ),
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(table,),
+                page_width=140,
+                page_height=130,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.page_count == 2
+    assert [warning.code for warning in layout.warnings] == ["table_row_split"]
+
+
+def test_layout_engine_repeats_header_row_across_split_data_row_pages() -> None:
+    # The data row (25 paragraphs, 275pt) does not fit even a fresh 110pt
+    # body, so it is split; every page that carries a slice of it must still
+    # repeat the header row at the top, per the existing repeat-header
+    # mechanism. Word's default lets a row break at the room remaining after
+    # the header, so the first page already carries header + a data slice
+    # instead of a wasted header-only page.
+    header = TableRowModel(
+        cells=(TableCellModel(paragraphs=(ParagraphModel(runs=(RunModel(text="H"),)),)),),
+        repeat_header=True,
+    )
+    data = TableRowModel(cells=(TableCellModel(paragraphs=_paragraphs(25)),))
+    table = TableModel(grid_widths=(100,), rows=(header, data))
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(table,),
+                page_width=140,
+                page_height=130,
+                margin_left=10,
+                margin_right=10,
+                margin_top=10,
+                margin_bottom=10,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.page_count == 3
+    assert [warning.code for warning in layout.warnings] == ["table_row_split", "table_row_split"]
+    # Every page repeats row 0 (the header) ahead of the row-1 data slice --
+    # including the first page, since the header row itself always fits.
+    for page in layout.pages:
+        assert [cell.row_index for cell in page.body[0].cells] == [0, 1]  # type: ignore[union-attr]
+    data_texts = [
+        fragment.text
+        for page in layout.pages
+        for cell in page.body[0].cells  # type: ignore[union-attr]
+        if cell.row_index == 1
+        for block in cell.blocks
+        for line in block.lines
+        for fragment in line.fragments
+    ]
+    assert data_texts == [f"l{index}" for index in range(25)]
 
 
 def test_layout_engine_extends_and_scales_incomplete_table_grid() -> None:
@@ -1527,3 +2043,148 @@ def test_layout_engine_skips_hidden_run_during_multi_run_wrapping() -> None:
         for fragment in line.fragments
     )
     assert text == "visible text"
+
+
+def test_layout_engine_snaps_line_height_to_doc_grid() -> None:
+    # font_size=12 measures to a natural line height of 12pt with
+    # _FixedTextMeasurer; a "lines" docGrid with an 18pt pitch must round
+    # that up to a single, full 18pt grid line (Word's w:docGrid type="lines"
+    # behaviour for the default Japanese template).
+    paragraph = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="hello", font_name="Helvetica", font_size=12),),
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(paragraph,),
+                doc_grid_type="lines",
+                doc_grid_line_pitch=18.0,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.pages[0].body[0].lines[0].height == 18.0  # type: ignore[union-attr]
+
+
+def test_layout_engine_snaps_line_height_to_next_doc_grid_multiple() -> None:
+    # font_size=20 measures to a 20pt natural line, which needs two 18pt
+    # grid lines (ceil(20/18) == 2) to fully contain it.
+    paragraph = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="hello", font_name="Helvetica", font_size=20),),
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(paragraph,),
+                doc_grid_type="lines",
+                doc_grid_line_pitch=18.0,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.pages[0].body[0].lines[0].height == 36.0  # type: ignore[union-attr]
+
+
+def test_layout_engine_does_not_snap_exact_line_spacing_to_doc_grid() -> None:
+    # Word always honours an explicit fixed line height over the grid.
+    paragraph = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="hello", font_name="Helvetica", font_size=12),),
+        line_spacing_rule="exact",
+        line_spacing=12.0,
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(paragraph,),
+                doc_grid_type="lines",
+                doc_grid_line_pitch=18.0,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.pages[0].body[0].lines[0].height == 12.0  # type: ignore[union-attr]
+
+
+def test_layout_engine_ignores_doc_grid_when_type_is_default() -> None:
+    # w:docGrid w:type="default" (the common case) does not snap lines even
+    # if a linePitch happens to be present.
+    paragraph = ResolvedParagraphModel(
+        runs=(ResolvedRunModel(text="hello", font_name="Helvetica", font_size=12),),
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(paragraph,),
+                doc_grid_type="default",
+                doc_grid_line_pitch=18.0,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    assert layout.pages[0].body[0].lines[0].height == pytest.approx(12.0)  # type: ignore[union-attr]
+
+
+def test_layout_engine_snaps_table_cell_text_to_doc_grid() -> None:
+    table = TableModel(
+        grid_widths=(80,),
+        rows=(TableRowModel(cells=(TableCellModel(paragraphs=(ParagraphModel(),)),)),),
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(table,),
+                doc_grid_type="lines",
+                doc_grid_line_pitch=18.0,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    cell = layout.pages[0].body[0].cells[0]  # type: ignore[union-attr]
+    # RunModel's default font size is 11pt; the empty paragraph falls back
+    # to the same 11pt metric, so it too should round up to the 18pt grid.
+    assert cell.blocks[0].lines[0].height == 18.0  # type: ignore[union-attr]
+
+
+def test_layout_engine_does_not_snap_vertically_merged_cell_text_to_doc_grid() -> None:
+    # Snapping a merged cell's height would change how many rows its
+    # row-span covers, risking turning a previously fine layout into one
+    # where the merge lands on a page-body chunk boundary that
+    # _split_table_box cannot represent. Merged cells keep their natural,
+    # unsnapped line heights.
+    table = TableModel(
+        grid_widths=(80,),
+        rows=(
+            TableRowModel(
+                cells=(TableCellModel(paragraphs=(ParagraphModel(),), vertical_merge="restart"),),
+            ),
+            TableRowModel(cells=(TableCellModel(vertical_merge="continue"),)),
+        ),
+    )
+    document = ResolvedDocumentModel(
+        sections=(
+            ResolvedSectionModel(
+                blocks=(table,),
+                doc_grid_type="lines",
+                doc_grid_line_pitch=18.0,
+            ),
+        ),
+    )
+
+    layout = NativeLayoutEngine(_FixedTextMeasurer()).layout(document, options=ConversionOptions())
+
+    merged_cell = next(
+        cell
+        for cell in layout.pages[0].body[0].cells  # type: ignore[union-attr]
+        if cell.row_span == 2
+    )
+    assert merged_cell.blocks[0].lines[0].height == 11.0

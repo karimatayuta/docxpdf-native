@@ -96,7 +96,7 @@ def test_resource_limits_reject_non_positive_values() -> None:
         ResourceLimits(max_pages=0)
 
 
-def test_conversion_options_default_to_strict_and_accept_font_paths() -> None:
+def test_conversion_options_default_to_lenient_and_accept_font_paths() -> None:
     options = ConversionOptions(
         font_configuration=FontConfiguration(
             font_directories=(Path("fonts"),),
@@ -105,7 +105,7 @@ def test_conversion_options_default_to_strict_and_accept_font_paths() -> None:
         )
     )
 
-    assert options.strict is True
+    assert options.strict is False
     assert options.deterministic is True
     assert options.font_configuration.font_directories == (Path("fonts"),)
     assert options.resource_limits.max_pages > 0

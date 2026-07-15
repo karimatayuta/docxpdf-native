@@ -50,13 +50,20 @@ class ImageBox(BlockBox):
     relationship_id: str | None = None
 
 
+class PlaceholderBox(BlockBox):
+    """A same-size rectangle drawn in place of unrenderable content."""
+
+    kind: Literal["placeholder"] = "placeholder"
+    label: str = ""
+
+
 class LineBox(BlockBox):
     kind: Literal["line"] = "line"
     used_width: float = Field(default=0, ge=0)
     ascent: float = Field(default=0, ge=0)
     descent: float = Field(default=0, ge=0)
     baseline: float = Field(default=0, ge=0)
-    fragments: tuple[TextFragment | ImageBox, ...] = ()
+    fragments: tuple[TextFragment | ImageBox | PlaceholderBox, ...] = ()
 
 
 class ParagraphBox(BlockBox):
@@ -73,7 +80,7 @@ class CellBox(BlockBox):
     column_index: int = Field(ge=0)
     row_span: int = Field(default=1, ge=1)
     column_span: int = Field(default=1, ge=1)
-    blocks: tuple[ParagraphBox | ImageBox, ...] = ()
+    blocks: tuple[ParagraphBox | ImageBox | PlaceholderBox, ...] = ()
     background_color: str | None = None
     borders: TableBorders = Field(default_factory=TableBorders)
     vertical_alignment: Literal["top", "center", "bottom"] = "top"
@@ -84,6 +91,7 @@ class TableBox(BlockBox):
     cells: tuple[CellBox, ...] = ()
     column_widths: tuple[float, ...] = ()
     row_heights: tuple[float, ...] = ()
+    row_cant_split: tuple[bool, ...] = ()
     table_index: int = Field(default=0, ge=0)
     continued_from_previous_page: bool = False
     continues_on_next_page: bool = False
@@ -106,9 +114,9 @@ class PageModel(FrozenModel):
     header_region: PageRegion | None = None
     body_region: PageRegion | None = None
     footer_region: PageRegion | None = None
-    header: tuple[ParagraphBox | TableBox | ImageBox | BlockBox, ...] = ()
-    body: tuple[ParagraphBox | TableBox | ImageBox | BlockBox, ...] = ()
-    footer: tuple[ParagraphBox | TableBox | ImageBox | BlockBox, ...] = ()
+    header: tuple[ParagraphBox | TableBox | ImageBox | PlaceholderBox | BlockBox, ...] = ()
+    body: tuple[ParagraphBox | TableBox | ImageBox | PlaceholderBox | BlockBox, ...] = ()
+    footer: tuple[ParagraphBox | TableBox | ImageBox | PlaceholderBox | BlockBox, ...] = ()
     source_start: int = Field(default=0, ge=0)
     source_end: int = Field(default=0, ge=0)
 

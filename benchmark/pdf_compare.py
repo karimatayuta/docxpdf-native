@@ -311,9 +311,7 @@ def _comparison_metrics(oracle: PdfSnapshot, candidate: PdfSnapshot) -> PdfCompa
         first_different = len(drifts) + 1
     return PdfComparisonMetrics(
         page_boundary_exact_matches=exact_matches,
-        page_boundary_match_rate=(
-            exact_matches / total_boundaries if total_boundaries else 1.0
-        ),
+        page_boundary_match_rate=(exact_matches / total_boundaries if total_boundaries else 1.0),
         mean_boundary_drift_chars=(
             sum(absolute_drifts) / len(absolute_drifts) if absolute_drifts else 0.0
         ),

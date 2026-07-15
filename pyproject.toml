@@ -17,8 +17,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Broadens inline-image support to GIF/BMP/TIFF (converted to PNG at parse
+# time). Without it, those formats still convert cleanly: they fall back to
+# a same-size placeholder instead of raising.
+images = [
+  "pillow>=11.0",
+]
 dev = [
   "mypy>=1.14",
+  "pillow>=11.0",
   "pypdf>=5.1",
   "pytest>=8.3",
   "pytest-cov>=6.0",
@@ -29,6 +36,10 @@ dev = [
 docxpdf-native = "docxpdf_native.cli:main"
 
 [tool.hatch.build.targets.wheel]
+# Hatchling includes every file inside the listed packages, which is what
+# ships the bundled metric-compatible fonts (SIL OFL 1.1, see
+# src/docxpdf_native/fonts/data/SOURCES.txt) as package data in both the
+# wheel and the sdist. Do not add excludes for *.ttf / OFL.txt here.
 packages = ["src/docxpdf_native"]
 
 [tool.pytest.ini_options]
@@ -78,6 +89,7 @@ ignore_missing_imports = true
 [dependency-groups]
 dev = [
   "mypy>=1.14",
+  "pillow>=11.0",
   "pypdf>=5.1",
   "pytest>=8.3",
   "pytest-cov>=6.0",

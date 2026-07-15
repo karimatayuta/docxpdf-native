@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Callable
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,6 +29,7 @@ from docxpdf_native.models import (
     PageRegion,
     ParagraphBox,
     ParagraphModel,
+    PlaceholderBox,
     ResolvedDocumentModel,
     ResolvedFont,
     ResolvedParagraphModel,
@@ -49,6 +52,23 @@ class _StyledCluster(BaseModel):
     width: float = Field(ge=0)
     run_index: int = Field(ge=0)
     run: ResolvedRunModel
+
+
+# Rows shorter than this many points are treated as fully consumed when comparing
+# against the remaining page height, absorbing floating point rounding noise.
+_LAYOUT_EPSILON = 1e-6
+
+
+class _RowUnit(BaseModel):
+    """A queued table row (or the remainder of a previously split row)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    row_index: int
+    row_top: float
+    height: float
+    cells: tuple[CellBox, ...]
+    cant_split: bool = False
 
 
 class NativeLayoutEngine(LayoutEngine):
@@ -112,6 +132,7 @@ class NativeLayoutEngine(LayoutEngine):
                     resolved_section,
                     section_index=section_index,
                     first_page_number=len(pages) + 1,
+                    warnings=warnings,
                 )
             elif tables:
                 section_pages = self._layout_tables_only(
@@ -119,6 +140,7 @@ class NativeLayoutEngine(LayoutEngine):
                     tables=tables,
                     section_index=section_index,
                     first_page_number=len(pages) + 1,
+                    warnings=warnings,
                 )
             else:
                 section_pages = self._layout_section(
@@ -276,6 +298,7 @@ class NativeLayoutEngine(LayoutEngine):
         *,
         section_index: int,
         first_page_number: int,
+        warnings: list[ConversionWarning],
     ) -> tuple[PageModel, ...]:
         body = PageRegion(
             x=section.margin_left,
@@ -283,12 +306,14 @@ class NativeLayoutEngine(LayoutEngine):
             width=section.page_width - section.margin_left - section.margin_right,
             height=section.page_height - section.margin_top - section.margin_bottom,
         )
+        doc_grid_line_pitch = self._doc_grid_line_pitch(section)
         blocks: list[ResolvedParagraphModel | TableModel] = []
         for block in section.blocks:
             if isinstance(block, ResolvedParagraphModel):
                 blocks.extend(self._split_page_breaks((block,)))
             else:
                 blocks.append(block)
+        blocks = self._collapse_paragraph_spacing(blocks)
 
         page_boxes: list[list[ParagraphBox | TableBox]] = [[]]
         cursor_y = body.y
@@ -301,13 +326,27 @@ class NativeLayoutEngine(LayoutEngine):
                     body=body,
                     y=cursor_y,
                     table_index=table_index,
+                    doc_grid_line_pitch=doc_grid_line_pitch,
                 )
                 table_index += 1
                 if table_box.y + table_box.height <= bottom:
                     page_boxes[-1].append(table_box)
                     cursor_y = table_box.y + table_box.height
                     continue
-                if page_boxes[-1]:
+                # The table does not fit in what's left of the current page.
+                # Rather than moving it whole to a fresh page (which would
+                # waste the remaining room here), let _split_table_box fill
+                # the rest of this page with as many rows as fit and only
+                # start a fresh page for what doesn't. Vertically merged
+                # cells are the exception: starting mid-page shrinks the
+                # first chunk and makes it more likely a merged cell's rows
+                # get split across chunks, which _split_table_box cannot
+                # represent and must reject. Keep those on the old, safe
+                # path of moving the whole table to a fresh page first.
+                has_vertical_merge = any(
+                    cell.vertical_merge is not None for row in block.rows for cell in row.cells
+                )
+                if has_vertical_merge and page_boxes[-1]:
                     page_boxes.append([])
                     cursor_y = body.y
                     table_box = self._layout_table(
@@ -315,6 +354,7 @@ class NativeLayoutEngine(LayoutEngine):
                         body=body,
                         y=cursor_y,
                         table_index=table_index - 1,
+                        doc_grid_line_pitch=doc_grid_line_pitch,
                     )
                 header_count = 0
                 for row in block.rows:
@@ -325,9 +365,17 @@ class NativeLayoutEngine(LayoutEngine):
                     table_box,
                     body=body,
                     header_count=header_count,
+                    warnings=warnings,
                 )
                 for chunk_index, chunk in enumerate(chunks):
-                    if chunk_index > 0:
+                    # The leading chunk continues the current page only if
+                    # it is actually anchored at the table's original
+                    # (possibly mid-page) starting position. It might not
+                    # be: _split_table_box abandons a too-narrow starting
+                    # sliver and anchors to a fresh page instead when
+                    # nothing fits there. Every other chunk always starts a
+                    # fresh page.
+                    if not (chunk_index == 0 and chunk.y == table_box.y):
                         page_boxes.append([])
                     page_boxes[-1].append(chunk)
                 cursor_y = chunks[-1].y + chunks[-1].height
@@ -338,7 +386,9 @@ class NativeLayoutEngine(LayoutEngine):
                 page_boxes.append([])
                 cursor_y = body.y
             available = body.model_copy(update={"y": cursor_y})
-            paragraph_box = self._single_line_paragraph(paragraph, body=available)
+            paragraph_box = self._single_line_paragraph(
+                paragraph, body=available, doc_grid_line_pitch=doc_grid_line_pitch
+            )
             next_block = blocks[block_index + 1] if block_index + 1 < len(blocks) else None
             if (
                 paragraph.keep_next
@@ -349,13 +399,17 @@ class NativeLayoutEngine(LayoutEngine):
                 following_region = body.model_copy(
                     update={"y": paragraph_box.y + paragraph_box.height}
                 )
-                following_box = self._single_line_paragraph(next_block, body=following_region)
+                following_box = self._single_line_paragraph(
+                    next_block, body=following_region, doc_grid_line_pitch=doc_grid_line_pitch
+                )
                 pair_height = paragraph_box.height + following_box.height
                 if following_box.y + following_box.height > bottom and pair_height <= body.height:
                     page_boxes.append([])
                     cursor_y = body.y
                     available = body.model_copy(update={"y": cursor_y})
-                    paragraph_box = self._single_line_paragraph(paragraph, body=available)
+                    paragraph_box = self._single_line_paragraph(
+                        paragraph, body=available, doc_grid_line_pitch=doc_grid_line_pitch
+                    )
             if paragraph_box.y + paragraph_box.height <= bottom:
                 page_boxes[-1].append(paragraph_box)
                 cursor_y = paragraph_box.y + paragraph_box.height
@@ -373,7 +427,9 @@ class NativeLayoutEngine(LayoutEngine):
                 page_boxes.append([])
                 cursor_y = body.y
                 available = body.model_copy(update={"y": cursor_y})
-                paragraph_box = self._single_line_paragraph(paragraph, body=available)
+                paragraph_box = self._single_line_paragraph(
+                    paragraph, body=available, doc_grid_line_pitch=doc_grid_line_pitch
+                )
             if paragraph_box.height > body.height:
                 raise LayoutError(
                     "paragraph cannot fit in the available page body",
@@ -552,7 +608,7 @@ class NativeLayoutEngine(LayoutEngine):
             for marker in replacements
         ):
             return line
-        fragments: list[TextFragment | ImageBox] = []
+        fragments: list[TextFragment | ImageBox | PlaceholderBox] = []
         cursor_x = line.x
         for fragment in line.fragments:
             if not isinstance(fragment, TextFragment):
@@ -591,6 +647,7 @@ class NativeLayoutEngine(LayoutEngine):
         tables: tuple[TableModel, ...],
         section_index: int,
         first_page_number: int,
+        warnings: list[ConversionWarning],
     ) -> tuple[PageModel, ...]:
         body = PageRegion(
             x=section.margin_left,
@@ -598,15 +655,29 @@ class NativeLayoutEngine(LayoutEngine):
             width=section.page_width - section.margin_left - section.margin_right,
             height=section.page_height - section.margin_top - section.margin_bottom,
         )
+        doc_grid_line_pitch = self._doc_grid_line_pitch(section)
         page_tables: list[TableBox] = []
         for table_index, table in enumerate(tables):
-            box = self._layout_table(table, body=body, y=body.y, table_index=table_index)
+            box = self._layout_table(
+                table,
+                body=body,
+                y=body.y,
+                table_index=table_index,
+                doc_grid_line_pitch=doc_grid_line_pitch,
+            )
             header_count = 0
             for row in table.rows:
                 if not row.repeat_header:
                     break
                 header_count += 1
-            page_tables.extend(self._split_table_box(box, body=body, header_count=header_count))
+            page_tables.extend(
+                self._split_table_box(
+                    box,
+                    body=body,
+                    header_count=header_count,
+                    warnings=warnings,
+                )
+            )
         return tuple(
             PageModel(
                 number=first_page_number + index,
@@ -632,44 +703,236 @@ class NativeLayoutEngine(LayoutEngine):
         *,
         body: PageRegion,
         header_count: int,
+        warnings: list[ConversionWarning],
     ) -> tuple[TableBox, ...]:
-        for row_index, row_height in enumerate(box.row_heights):
-            if row_height > body.height:
-                raise LayoutError(
-                    "table row cannot fit in the available page body",
-                    location=f"table[{box.table_index}]/row[{row_index}]",
-                )
-        chunks: list[tuple[int, int, bool]]
-        if box.height <= body.height:
-            chunks = [(0, len(box.row_heights), False)]
-        else:
-            chunks = []
-            start = 0
-            first = True
-            header_height = sum(box.row_heights[:header_count])
-            while start < len(box.row_heights):
-                repeated = not first and header_count > 0
-                used_height = header_height if repeated else 0.0
-                end = start
-                while end < len(box.row_heights):
-                    row_height = box.row_heights[end]
-                    if used_height + row_height > body.height:
-                        break
-                    used_height += row_height
-                    end += 1
-                if end == start:
-                    raise LayoutError(
-                        "table row cannot fit below repeated header",
-                        location=f"table[{box.table_index}]/row[{start}]",
-                    )
-                chunks.append((start, end, repeated))
-                start = end
-                first = False
-        boundaries = {row_end for _, row_end, _ in chunks[:-1]}
+        """Paginate a table box, splitting rows across pages when necessary.
+
+        ``box.y`` may already sit partway down the current page (a table
+        that starts after some preceding paragraphs): the first chunk only
+        gets the remaining room down to the bottom of the body, while every
+        following chunk gets a fresh, full page starting at ``body.y``. Rows
+        are placed whole whenever possible (mirroring Word's default of
+        moving an oversized row to the next page). A row is only split at a
+        page boundary once even a fresh page body cannot hold it -- at that
+        point ``w:cantSplit`` can no longer be honoured, so we fall back to
+        splitting deterministically rather than raising or looping forever.
+        Vertically merged cells that span more than one row are kept out of
+        scope: if pagination would cut through one, the previous hard error
+        is preserved rather than guessing how to divide the merged content.
+        """
+        first_chunk_available = body.y + body.height - box.y
+        if box.height <= first_chunk_available:
+            return (box,)
+
+        cells_by_row: dict[int, list[CellBox]] = {}
         for cell in box.cells:
-            if any(
+            cells_by_row.setdefault(cell.row_index, []).append(cell)
+        vmerge_rows = {cell.row_index for cell in box.cells if cell.row_span > 1}
+
+        header_height = sum(box.row_heights[:header_count])
+        if header_count > 0 and header_height > body.height:
+            # The header itself cannot be repeated within the body; give up on
+            # repeating it instead of failing the whole table.
+            header_count = 0
+            header_height = 0.0
+
+        queue: deque[_RowUnit] = deque(
+            _RowUnit(
+                row_index=row_index,
+                row_top=(cells_by_row[row_index][0].y if row_index in cells_by_row else body.y),
+                height=box.row_heights[row_index],
+                cells=tuple(cells_by_row.get(row_index, ())),
+                cant_split=(
+                    box.row_cant_split[row_index] if row_index < len(box.row_cant_split) else False
+                ),
+            )
+            for row_index in range(len(box.row_heights))
+        )
+
+        chunk_specs: list[tuple[list[CellBox], float, bool, float]] = []
+        row_boundaries: set[int] = set()
+        current_cells: list[CellBox] = []
+        current_height = 0.0
+        current_header_applied = False
+        # is_first_chunk controls whether header rows repeat: it stays True
+        # until the first chunk is flushed, since that leading chunk already
+        # contains the header rows themselves (nothing to repeat yet).
+        is_first_chunk = True
+        # chunk_anchor is the y the *current* chunk is being built from. It
+        # starts at box.y, which may already sit partway down the page (a
+        # table that starts after preceding content); if nothing fits in
+        # that cramped remainder it is abandoned in favour of a fresh page
+        # at body.y, independently of is_first_chunk/header semantics above.
+        chunk_anchor = box.y
+
+        def flush() -> None:
+            nonlocal current_cells, current_height, is_first_chunk, current_header_applied
+            nonlocal chunk_anchor
+            chunk_specs.append(
+                (current_cells, current_height, current_header_applied, chunk_anchor)
+            )
+            current_cells = []
+            current_height = 0.0
+            current_header_applied = False
+            is_first_chunk = False
+            chunk_anchor = body.y
+
+        def place(unit: _RowUnit, *, height: float, header_applied: bool) -> None:
+            nonlocal current_height, current_header_applied
+            header_offset = header_height if header_applied else 0.0
+            target_y = chunk_anchor + header_offset + current_height
+            delta = target_y - unit.row_top
+            for cell in unit.cells:
+                moved = self._move_cell(cell, delta=delta)
+                # A split-off remainder still carries the original row's
+                # height; pin every cell to the height actually placed here.
+                current_cells.append(moved.model_copy(update={"height": height}))
+            current_height += height
+            # Every row placed in a chunk must agree on whether the header was
+            # repeated; the branches below only ever place one kind per chunk.
+            current_header_applied = header_applied
+
+        def try_split(unit: _RowUnit, *, budget: float, header_applied: bool) -> bool:
+            """Place up to ``budget`` points of ``unit`` in the current
+            chunk, pushing any remainder back to the front of the queue and
+            flushing. Returns False, leaving the queue and current chunk
+            untouched, if not even one line or atomic block (image,
+            placeholder) fits within ``budget`` -- the caller falls back to
+            trying a fresh page in that case.
+            """
+            budget = max(0.0, min(unit.height, budget))
+            split_y = unit.row_top + budget
+            top_cells, bottom_cells = self._slice_row_at(
+                unit.cells, row_top=unit.row_top, split_y=split_y
+            )
+            if not any(cell.blocks for cell in top_cells):
+                return False
+            place(
+                _RowUnit(
+                    row_index=unit.row_index,
+                    row_top=unit.row_top,
+                    height=budget,
+                    cells=tuple(top_cells),
+                ),
+                height=budget,
+                header_applied=header_applied,
+            )
+            queue.popleft()
+            warnings.append(
+                ConversionWarning(
+                    code="table_row_split",
+                    message=(
+                        "A table row does not fit within a single page body and was "
+                        "split across pages."
+                    ),
+                    part="word/document.xml",
+                    location=f"table[{box.table_index}]/row[{unit.row_index}]",
+                )
+            )
+            if bottom_cells:
+                queue.appendleft(
+                    _RowUnit(
+                        row_index=unit.row_index,
+                        row_top=split_y,
+                        height=unit.height - budget,
+                        cells=tuple(bottom_cells),
+                    )
+                )
+            flush()
+            return True
+
+        while queue:
+            unit = queue[0]
+            header_applied = header_count > 0 and not is_first_chunk
+            chunk_limit = body.y + body.height - chunk_anchor
+            available = chunk_limit - (header_height if header_applied else 0.0) - current_height
+            if unit.height <= available + _LAYOUT_EPSILON:
+                place(unit, height=unit.height, header_applied=header_applied)
+                queue.popleft()
+                continue
+
+            # Word's default lets a row break across pages: a splittable row
+            # (not cantSplit, not part of a vertical merge) is cut at the
+            # room remaining in the current chunk before anything else is
+            # tried. Only when not even the row's first line/atomic block
+            # fits there does this fall through to moving the row whole to
+            # a fresh page below.
+            can_split = not unit.cant_split and unit.row_index not in vmerge_rows
+            if can_split and try_split(unit, budget=available, header_applied=header_applied):
+                continue
+
+            if current_cells:
+                # Try the row again at the top of a fresh page first.
+                flush()
+                row_boundaries.add(unit.row_index)
+                continue
+            if chunk_anchor != body.y:
+                # Nothing fit in the cramped remainder left over from
+                # preceding content on this page. Abandon that starting
+                # position and re-evaluate this row against a genuine fresh
+                # page instead -- is_first_chunk (and therefore whether a
+                # header row repeats) is untouched by this.
+                chunk_anchor = body.y
+                continue
+            fresh_header_applied = header_count > 0 and not is_first_chunk
+            fresh_available = body.height - (header_height if fresh_header_applied else 0.0)
+            if unit.height <= fresh_available + _LAYOUT_EPSILON:
+                place(unit, height=unit.height, header_applied=fresh_header_applied)
+                queue.popleft()
+                continue
+            if fresh_header_applied and unit.height <= body.height + _LAYOUT_EPSILON:
+                # The row would fit a fresh page on its own; the repeated
+                # header is what's crowding it out. Drop the repeat for this
+                # one page rather than splitting the row unnecessarily.
+                place(unit, height=unit.height, header_applied=False)
+                queue.popleft()
+                flush()
+                continue
+            # The row is taller than a full, header-free page body: it must
+            # be split (or, for a vmerge span, treated as unsupported).
+            # w:cantSplit can no longer be honoured at this point either --
+            # Word itself ends up splitting (or overflowing) a row that
+            # tall, so we fall back to splitting deterministically rather
+            # than raising or looping forever.
+            if unit.row_index in vmerge_rows:
+                raise LayoutError(
+                    "vertically merged cell cannot cross a page boundary",
+                    location=f"table[{box.table_index}]/row[{unit.row_index}]",
+                )
+            # Keep repeating the header on split segments too, unless doing
+            # so would leave no room at all for content.
+            split_header_applied = fresh_header_applied
+            split_budget = body.height - (header_height if split_header_applied else 0.0)
+            if split_budget <= _LAYOUT_EPSILON:
+                split_header_applied = False
+                split_budget = body.height
+            if try_split(unit, budget=split_budget, header_applied=split_header_applied):
+                continue
+            # Not even a single line/image fits a fresh page body (for
+            # example a single image taller than the page). Place the row
+            # whole and let it overflow instead of looping forever.
+            place(unit, height=unit.height, header_applied=False)
+            queue.popleft()
+            warnings.append(
+                ConversionWarning(
+                    code="table_row_overflow",
+                    message=(
+                        "A table row is taller than the page body and could not be "
+                        "split further; it overflows the page."
+                    ),
+                    part="word/document.xml",
+                    location=f"table[{box.table_index}]/row[{unit.row_index}]",
+                )
+            )
+            flush()
+
+        if current_cells or not chunk_specs:
+            flush()
+
+        for cell in box.cells:
+            if cell.row_span > 1 and any(
                 cell.row_index < boundary < cell.row_index + cell.row_span
-                for boundary in boundaries
+                for boundary in row_boundaries
             ):
                 raise LayoutError(
                     "vertically merged cell cannot cross a page boundary",
@@ -678,17 +941,15 @@ class NativeLayoutEngine(LayoutEngine):
                         f"/column[{cell.column_index}]"
                     ),
                 )
+
         result: list[TableBox] = []
-        for chunk_index, (row_start, row_end, repeated) in enumerate(chunks):
-            original_y = box.y + sum(box.row_heights[:row_start])
-            data_target_y = body.y + (sum(box.row_heights[:header_count]) if repeated else 0.0)
-            data_delta = data_target_y - original_y
-            data_cells = tuple(
-                self._move_cell(cell, delta=data_delta)
-                for cell in box.cells
-                if row_start <= cell.row_index < row_end
-            )
-            if repeated:
+        for chunk_index, (data_cells, data_height, header_repeated, anchor_y) in enumerate(
+            chunk_specs
+        ):
+            if header_repeated:
+                # header_repeated only ever happens once is_first_chunk is
+                # False, at which point chunk_anchor has already settled to
+                # body.y -- so the header rows always belong at body.y too.
                 header_delta = body.y - box.y
                 header_cells = tuple(
                     self._move_cell(cell, delta=header_delta)
@@ -696,26 +957,111 @@ class NativeLayoutEngine(LayoutEngine):
                     if cell.row_index < header_count
                 )
                 cells = (*header_cells, *data_cells)
-                heights = (*box.row_heights[:header_count], *box.row_heights[row_start:row_end])
+                total_height = header_height + data_height
             else:
-                cells = data_cells
-                heights = box.row_heights[row_start:row_end]
+                cells = tuple(data_cells)
+                total_height = data_height
             result.append(
                 box.model_copy(
                     update={
-                        "y": body.y,
-                        "height": sum(heights),
+                        "y": anchor_y,
+                        "height": total_height,
                         "cells": cells,
-                        "row_heights": heights,
+                        "row_heights": (total_height,),
+                        "row_cant_split": (False,),
                         "continued_from_previous_page": chunk_index > 0,
-                        "continues_on_next_page": chunk_index + 1 < len(chunks),
+                        "continues_on_next_page": chunk_index + 1 < len(chunk_specs),
                     }
                 )
             )
         return tuple(result)
 
+    def _slice_row_at(
+        self,
+        cells: tuple[CellBox, ...],
+        *,
+        row_top: float,
+        split_y: float,
+    ) -> tuple[list[CellBox], list[CellBox]]:
+        """Split a row's cells at an absolute y position.
+
+        Every cell is cut at the same ``split_y`` so the row breaks along one
+        straight line, matching how Word visually splits a row across pages.
+        Cells that end up with no content on one side simply keep their
+        content on the other side; borders and background colours are copied
+        onto both parts unchanged. The bottom half's cells are re-anchored to
+        ``split_y`` so a later split (a row spanning three or more pages) can
+        keep cutting relative to the correct top.
+        """
+        top_height = max(0.0, split_y - row_top)
+        top_cells: list[CellBox] = []
+        bottom_cells: list[CellBox] = []
+        for cell in cells:
+            top_blocks, bottom_blocks = self._slice_cell_blocks_at(cell.blocks, split_y=split_y)
+            top_cells.append(cell.model_copy(update={"blocks": top_blocks, "height": top_height}))
+            if bottom_blocks:
+                bottom_cells.append(cell.model_copy(update={"blocks": bottom_blocks, "y": split_y}))
+        return top_cells, bottom_cells
+
+    @staticmethod
+    def _slice_cell_blocks_at(
+        blocks: tuple[ParagraphBox | ImageBox | PlaceholderBox, ...],
+        *,
+        split_y: float,
+    ) -> tuple[
+        tuple[ParagraphBox | ImageBox | PlaceholderBox, ...],
+        tuple[ParagraphBox | ImageBox | PlaceholderBox, ...],
+    ]:
+        """Split a cell's content blocks at an absolute y position.
+
+        Paragraphs are split line-by-line so that only whole lines cross the
+        boundary; non-paragraph blocks (images, placeholders) are atomic and
+        are placed entirely above or entirely below the split.
+        """
+        top: list[ParagraphBox | ImageBox | PlaceholderBox] = []
+        bottom: list[ParagraphBox | ImageBox | PlaceholderBox] = []
+        for block in blocks:
+            if bottom:
+                # Once content has spilled below the split, keep the
+                # remainder together so paragraph order is preserved.
+                bottom.append(block)
+                continue
+            if block.y + block.height <= split_y:
+                top.append(block)
+                continue
+            if isinstance(block, ParagraphBox) and block.y < split_y:
+                top_lines = tuple(line for line in block.lines if line.y + line.height <= split_y)
+                bottom_lines = tuple(line for line in block.lines if line.y + line.height > split_y)
+                if top_lines:
+                    last = top_lines[-1]
+                    top.append(
+                        block.model_copy(
+                            update={
+                                "lines": top_lines,
+                                "height": (last.y + last.height) - block.y,
+                                "continues_on_next_page": True,
+                            }
+                        )
+                    )
+                if bottom_lines:
+                    first = bottom_lines[0]
+                    last = bottom_lines[-1]
+                    bottom.append(
+                        block.model_copy(
+                            update={
+                                "lines": bottom_lines,
+                                "y": first.y,
+                                "height": (last.y + last.height) - first.y,
+                                "continued_from_previous_page": True,
+                            }
+                        )
+                    )
+                continue
+            bottom.append(block)
+        return tuple(top), tuple(bottom)
+
     def _move_cell(self, cell: CellBox, *, delta: float) -> CellBox:
-        blocks: list[ParagraphBox | ImageBox] = []
+        blocks: list[ParagraphBox | ImageBox | PlaceholderBox] = []
         for block in cell.blocks:
             if isinstance(block, ParagraphBox):
                 blocks.append(
@@ -739,6 +1085,7 @@ class NativeLayoutEngine(LayoutEngine):
         body: PageRegion,
         y: float,
         table_index: int,
+        doc_grid_line_pitch: float | None = None,
     ) -> TableBox:
         column_count = max(
             len(table.grid_widths),
@@ -786,6 +1133,7 @@ class NativeLayoutEngine(LayoutEngine):
             x += max(0.0, body.width - total_width)
         cells: list[CellBox] = []
         row_heights: list[float] = []
+        row_cant_split: list[bool] = []
         row_y = y
         for row_index, row in enumerate(table.rows):
             pending: list[
@@ -815,12 +1163,29 @@ class NativeLayoutEngine(LayoutEngine):
                 )
                 paragraph_boxes: list[ParagraphBox] = []
                 paragraph_y = paragraph_region.y
+                previous_paragraph_after = 0.0
+                # A vertically merged cell's height feeds directly into
+                # whether its row-span can still fit in one page-body chunk
+                # (see the vmerge boundary checks in _split_table_box).
+                # Snapping its lines to the grid would change that height
+                # and could turn a previously fine layout into an
+                # unsplittable merge spanning a page boundary, so merged
+                # cells keep their unsnapped natural line heights.
+                cell_doc_grid_pitch = (
+                    None if cell.vertical_merge is not None else doc_grid_line_pitch
+                )
                 for raw_paragraph in cell.paragraphs:
                     resolved = self._resolve_table_paragraph(raw_paragraph)
                     if cell.text_alignment is not None:
                         resolved = resolved.model_copy(update={"alignment": cell.text_alignment})
+                    effective_before = max(0.0, resolved.space_before - previous_paragraph_after)
+                    if effective_before != resolved.space_before:
+                        resolved = resolved.model_copy(update={"space_before": effective_before})
+                    previous_paragraph_after = resolved.space_after
                     region = paragraph_region.model_copy(update={"y": paragraph_y})
-                    paragraph_box = self._single_line_paragraph(resolved, body=region)
+                    paragraph_box = self._single_line_paragraph(
+                        resolved, body=region, doc_grid_line_pitch=cell_doc_grid_pitch
+                    )
                     paragraph_boxes.append(paragraph_box)
                     paragraph_y += paragraph_box.height
                 content_height = paragraph_y - row_y + margin_bottom
@@ -841,6 +1206,7 @@ class NativeLayoutEngine(LayoutEngine):
             else:
                 row_height = max(calculated_height, row.height or 0.0, 11.0)
             row_heights.append(row_height)
+            row_cant_split.append(row.cant_split)
             for (
                 column_index,
                 cell_width,
@@ -887,6 +1253,7 @@ class NativeLayoutEngine(LayoutEngine):
             cells=tuple(cells),
             column_widths=tuple(widths),
             row_heights=tuple(row_heights),
+            row_cant_split=tuple(row_cant_split),
             table_index=table_index,
             borders=table.borders,
             source_start=table.source_index,
@@ -996,16 +1363,22 @@ class NativeLayoutEngine(LayoutEngine):
             width=section.page_width - section.margin_left - section.margin_right,
             height=section.page_height - section.margin_top - section.margin_bottom,
         )
+        doc_grid_line_pitch = self._doc_grid_line_pitch(section)
         page_boxes: list[list[ParagraphBox | TableBox]] = [[]]
         cursor_y = body.y
         bottom = body.y + body.height
-        expanded_paragraphs = self._split_page_breaks(paragraphs)
+        expanded_paragraphs = cast(
+            "tuple[ResolvedParagraphModel, ...]",
+            tuple(self._collapse_paragraph_spacing(list(self._split_page_breaks(paragraphs)))),
+        )
         for paragraph_index, paragraph in enumerate(expanded_paragraphs):
             if page_boxes[-1] and paragraph.page_break_before:
                 page_boxes.append([])
                 cursor_y = body.y
             available = body.model_copy(update={"y": cursor_y})
-            box = self._single_line_paragraph(paragraph, body=available)
+            box = self._single_line_paragraph(
+                paragraph, body=available, doc_grid_line_pitch=doc_grid_line_pitch
+            )
             if (
                 paragraph.keep_next
                 and paragraph_index + 1 < len(expanded_paragraphs)
@@ -1014,14 +1387,18 @@ class NativeLayoutEngine(LayoutEngine):
             ):
                 following_region = body.model_copy(update={"y": box.y + box.height})
                 following_box = self._single_line_paragraph(
-                    expanded_paragraphs[paragraph_index + 1], body=following_region
+                    expanded_paragraphs[paragraph_index + 1],
+                    body=following_region,
+                    doc_grid_line_pitch=doc_grid_line_pitch,
                 )
                 pair_height = box.height + following_box.height
                 if following_box.y + following_box.height > bottom and pair_height <= body.height:
                     page_boxes.append([])
                     cursor_y = body.y
                     available = body.model_copy(update={"y": cursor_y})
-                    box = self._single_line_paragraph(paragraph, body=available)
+                    box = self._single_line_paragraph(
+                        paragraph, body=available, doc_grid_line_pitch=doc_grid_line_pitch
+                    )
             if box.y + box.height <= bottom:
                 page_boxes[-1].append(box)
                 cursor_y = box.y + box.height
@@ -1039,7 +1416,9 @@ class NativeLayoutEngine(LayoutEngine):
                 page_boxes.append([])
                 cursor_y = body.y
                 available = body.model_copy(update={"y": cursor_y})
-                box = self._single_line_paragraph(paragraph, body=available)
+                box = self._single_line_paragraph(
+                    paragraph, body=available, doc_grid_line_pitch=doc_grid_line_pitch
+                )
             if box.height > body.height:
                 raise LayoutError(
                     "paragraph cannot fit in the available page body",
@@ -1185,11 +1564,79 @@ class NativeLayoutEngine(LayoutEngine):
                 )
         return tuple(expanded)
 
+    @staticmethod
+    def _collapse_paragraph_spacing(
+        blocks: list[ResolvedParagraphModel | TableModel],
+    ) -> list[ResolvedParagraphModel | TableModel]:
+        """Apply Word's paragraph-spacing collapse between adjacent paragraphs.
+
+        Word does not add a paragraph's ``space_after`` to the next
+        paragraph's ``space_before``; the gap between them is the larger of
+        the two. Since a paragraph's own box height already accounts for its
+        ``space_after``, the collapse is applied by shrinking the following
+        paragraph's ``space_before`` down to only the amount not already
+        covered by the previous paragraph's ``space_after``. Non-paragraph
+        blocks (tables) and explicit page breaks reset the previous
+        paragraph's contribution, since nothing collapses across them.
+        """
+        result: list[ResolvedParagraphModel | TableModel] = []
+        previous_after = 0.0
+        for block in blocks:
+            if not isinstance(block, ResolvedParagraphModel):
+                result.append(block)
+                previous_after = 0.0
+                continue
+            if block.page_break_before:
+                previous_after = 0.0
+            effective_before = max(0.0, block.space_before - previous_after)
+            if effective_before != block.space_before:
+                block = block.model_copy(update={"space_before": effective_before})
+            result.append(block)
+            previous_after = block.space_after
+        return result
+
+    @staticmethod
+    def _snap_line_height_to_doc_grid(
+        line_height: float,
+        *,
+        line_spacing_rule: str,
+        doc_grid_line_pitch: float | None,
+    ) -> float:
+        """Snap a line's height up to the section's ``w:docGrid`` line pitch.
+
+        Word sections with ``w:docGrid w:type="lines"`` (or
+        ``"linesAndChars"``) round every line's natural height up to the
+        nearest multiple of ``w:linePitch``, so a 10.5pt font whose natural
+        line is well under an 18pt grid still consumes a full grid line.
+        Skipping this makes native text denser than Word's and understates
+        page counts for documents that rely on the default Japanese
+        template, which sets this grid. A line whose spacing rule is
+        ``exact`` is left untouched -- Word always honours an explicit fixed
+        line height over the grid.
+        """
+        if doc_grid_line_pitch is None or line_spacing_rule == "exact":
+            return line_height
+        grid_lines = math.ceil(line_height / doc_grid_line_pitch - _LAYOUT_EPSILON)
+        return max(1, grid_lines) * doc_grid_line_pitch
+
+    @staticmethod
+    def _doc_grid_line_pitch(section: ResolvedSectionModel) -> float | None:
+        """Return the section's line-grid pitch, or ``None`` if it has none.
+
+        Only ``w:docGrid`` types that actually snap line heights to a grid
+        (``lines`` and ``linesAndChars``) apply; ``default`` and
+        ``snapToChars`` leave line heights alone.
+        """
+        if section.doc_grid_type not in {"lines", "linesAndChars"}:
+            return None
+        return section.doc_grid_line_pitch
+
     def _single_line_paragraph(
         self,
         paragraph: ResolvedParagraphModel,
         *,
         body: PageRegion,
+        doc_grid_line_pitch: float | None = None,
     ) -> ParagraphBox:
         if paragraph.numbering_label is not None:
             runs = list(paragraph.runs)
@@ -1205,23 +1652,31 @@ class NativeLayoutEngine(LayoutEngine):
             return self._single_line_paragraph(
                 paragraph.model_copy(update={"runs": tuple(runs), "numbering_label": None}),
                 body=body,
+                doc_grid_line_pitch=doc_grid_line_pitch,
             )
         if any(run.break_type == "line" for run in paragraph.runs):
-            return self._explicit_line_paragraph(paragraph, body=body)
+            return self._explicit_line_paragraph(
+                paragraph, body=body, doc_grid_line_pitch=doc_grid_line_pitch
+            )
         visible_runs = tuple(
             run for run in paragraph.runs if not run.hidden and run.text and run.image is None
         )
         plain_text_runs = all(
-            run.break_type is None and not run.tab and run.image is None for run in paragraph.runs
+            run.break_type is None and not run.tab and run.image is None and run.placeholder is None
+            for run in paragraph.runs
         )
         if len(visible_runs) == 1 and plain_text_runs:
-            return self._wrapped_text_paragraph(paragraph, run=visible_runs[0], body=body)
+            return self._wrapped_text_paragraph(
+                paragraph, run=visible_runs[0], body=body, doc_grid_line_pitch=doc_grid_line_pitch
+            )
         if len(visible_runs) > 1 and plain_text_runs:
-            return self._wrapped_runs_paragraph(paragraph, body=body)
+            return self._wrapped_runs_paragraph(
+                paragraph, body=body, doc_grid_line_pitch=doc_grid_line_pitch
+            )
 
         x = body.x + paragraph.left_indent + paragraph.first_line_indent - paragraph.hanging_indent
         y = body.y + paragraph.space_before
-        fragments: list[TextFragment | ImageBox] = []
+        fragments: list[TextFragment | ImageBox | PlaceholderBox] = []
         used_width = 0.0
         ascent = 0.0
         descent = 0.0
@@ -1257,6 +1712,29 @@ class NativeLayoutEngine(LayoutEngine):
                         content_type=run.image.content_type,
                         part_name=run.image.part_name,
                         relationship_id=run.image.relationship_id,
+                        source_start=source_offset,
+                        source_end=source_offset + 1,
+                    )
+                )
+                used_width += width
+                ascent = max(ascent, height)
+                source_offset += 1
+                continue
+            if run.placeholder is not None:
+                available_width = max(
+                    0.01,
+                    body.width - paragraph.left_indent - paragraph.right_indent - used_width,
+                )
+                scale = min(1.0, available_width / run.placeholder.width)
+                width = run.placeholder.width * scale
+                height = run.placeholder.height * scale
+                fragments.append(
+                    PlaceholderBox(
+                        x=x + used_width,
+                        y=y,
+                        width=width,
+                        height=height,
+                        label=run.placeholder.label,
                         source_start=source_offset,
                         source_end=source_offset + 1,
                     )
@@ -1314,7 +1792,11 @@ class NativeLayoutEngine(LayoutEngine):
             metric = self._text_measurer.measure("Ag", default_font, 11.0)
             ascent = metric.ascent
             descent = metric.descent
-        height = ascent + descent
+        height = self._snap_line_height_to_doc_grid(
+            ascent + descent,
+            line_spacing_rule=paragraph.line_spacing_rule,
+            doc_grid_line_pitch=doc_grid_line_pitch,
+        )
         line = LineBox(
             x=x,
             y=y,
@@ -1344,6 +1826,7 @@ class NativeLayoutEngine(LayoutEngine):
         paragraph: ResolvedParagraphModel,
         *,
         body: PageRegion,
+        doc_grid_line_pitch: float | None = None,
     ) -> ParagraphBox:
         groups: list[list[ResolvedRunModel]] = [[]]
         for run in paragraph.runs:
@@ -1407,7 +1890,11 @@ class NativeLayoutEngine(LayoutEngine):
                 source_offset += 1
                 ascent = 8.8
                 descent = 2.2
-            line_height = ascent + descent
+            line_height = self._snap_line_height_to_doc_grid(
+                ascent + descent,
+                line_spacing_rule=paragraph.line_spacing_rule,
+                doc_grid_line_pitch=doc_grid_line_pitch,
+            )
             lines.append(
                 LineBox(
                     x=x,
@@ -1442,6 +1929,7 @@ class NativeLayoutEngine(LayoutEngine):
         paragraph: ResolvedParagraphModel,
         *,
         body: PageRegion,
+        doc_grid_line_pitch: float | None = None,
     ) -> ParagraphBox:
         clusters = self._styled_clusters(paragraph)
         first_offset = paragraph.first_line_indent - paragraph.hanging_indent
@@ -1496,6 +1984,11 @@ class NativeLayoutEngine(LayoutEngine):
                 line_height = max(natural_height, paragraph.line_spacing)
             else:
                 line_height = natural_height * paragraph.line_spacing
+            line_height = self._snap_line_height_to_doc_grid(
+                line_height,
+                line_spacing_rule=paragraph.line_spacing_rule,
+                doc_grid_line_pitch=doc_grid_line_pitch,
+            )
 
             fragments: list[TextFragment] = []
             cursor_x = line_x
@@ -1685,6 +2178,7 @@ class NativeLayoutEngine(LayoutEngine):
         *,
         run: ResolvedRunModel,
         body: PageRegion,
+        doc_grid_line_pitch: float | None = None,
     ) -> ParagraphBox:
         resolved_run = run
         font = ResolvedFont(
@@ -1721,6 +2215,11 @@ class NativeLayoutEngine(LayoutEngine):
             line_height = max(natural_height, paragraph.line_spacing)
         else:
             line_height = natural_height * paragraph.line_spacing
+        line_height = self._snap_line_height_to_doc_grid(
+            line_height,
+            line_spacing_rule=paragraph.line_spacing_rule,
+            doc_grid_line_pitch=doc_grid_line_pitch,
+        )
         lines: list[LineBox] = []
         y = body.y + paragraph.space_before
         for index, broken in enumerate(broken_lines):

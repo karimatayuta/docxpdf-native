@@ -119,9 +119,27 @@ class NativeStyleResolver(StyleResolver):
     ) -> ResolvedParagraphModel:
         paragraph_style_id = paragraph.style_id or default_style_id
         try:
-            paragraph_style = style_resolver.resolve(
+            # Which numbering definition/level applies (if any) can itself
+            # depend on the style chain, so it takes one preliminary merge to
+            # find out. Once known, the numbering level's own w:pPr (almost
+            # always just w:ind, e.g. hanging="360" for the label) is
+            # layered in between the paragraph style and direct formatting:
+            # Word lets a numbering level override the paragraph style's
+            # indentation, but direct formatting still overrides the
+            # numbering level.
+            preliminary = style_resolver.resolve(
                 paragraph_style_id=paragraph_style_id,
                 paragraph_direct=paragraph.properties,
+            ).paragraph
+            numbering_properties = self._numbering_paragraph_properties(preliminary, numbering)
+            effective_direct = (
+                self._merge_paragraph_properties(numbering_properties, paragraph.properties)
+                if numbering_properties is not None
+                else paragraph.properties
+            )
+            paragraph_style = style_resolver.resolve(
+                paragraph_style_id=paragraph_style_id,
+                paragraph_direct=effective_direct,
             )
             runs = tuple(
                 resolved_run
@@ -131,7 +149,7 @@ class NativeStyleResolver(StyleResolver):
                     paragraph=paragraph,
                     run_index=run_index,
                     paragraph_style_id=paragraph_style_id,
-                    paragraph_direct=paragraph.properties,
+                    paragraph_direct=effective_direct,
                     style_resolver=style_resolver,
                 )
             )
@@ -208,6 +226,7 @@ class NativeStyleResolver(StyleResolver):
                     break_type=run.break_type,
                     tab=run.tab,
                     image=run.image,
+                    placeholder=run.placeholder,
                     hidden=run.hidden or bool(effective.hidden),
                     source_index=run.source_index,
                 )
@@ -307,6 +326,26 @@ class NativeStyleResolver(StyleResolver):
             widow_control=paragraph.widow_control,
             tabs=paragraph.tabs,
         )
+        source_runs = paragraph.runs
+        if paragraph.numbering_label is not None:
+            # Table cells re-resolve from this raw ParagraphModel later
+            # (NativeLayoutEngine._resolve_table_paragraph) without access to
+            # the document's numbering definitions, so the already-resolved
+            # label (e.g. a bullet glyph) must be baked into the leading
+            # run's text now or it is silently dropped -- mirroring how
+            # _single_line_paragraph does this for body paragraphs.
+            if source_runs and source_runs[0].text:
+                source_runs = (
+                    source_runs[0].model_copy(
+                        update={"text": f"{paragraph.numbering_label} {source_runs[0].text}"}
+                    ),
+                    *source_runs[1:],
+                )
+            else:
+                source_runs = (
+                    ResolvedRunModel(text=f"{paragraph.numbering_label} "),
+                    *source_runs,
+                )
         runs = tuple(
             RunModel(
                 text=run.text,
@@ -327,10 +366,11 @@ class NativeStyleResolver(StyleResolver):
                 break_type=run.break_type,
                 tab=run.tab,
                 image=run.image,
+                placeholder=run.placeholder,
                 hidden=run.hidden,
                 source_index=run.source_index,
             )
-            for run in paragraph.runs
+            for run in source_runs
         )
         return ParagraphModel(runs=runs, properties=properties, source_index=paragraph.source_index)
 
@@ -362,6 +402,48 @@ class NativeStyleResolver(StyleResolver):
         if level_model.number_format == "bullet":
             return level_model.text
         return level_model.text.replace(f"%{level + 1}", str(value))
+
+    @staticmethod
+    def _numbering_paragraph_properties(
+        properties: ParagraphProperties,
+        numbering: tuple[NumberingDefinition, ...],
+    ) -> ParagraphProperties | None:
+        """Return the numbering level's own ``w:pPr`` (usually just ``w:ind``).
+
+        ``properties`` must already reflect the paragraph's effective
+        ``numbering_id``/``numbering_level`` (resolved through the normal
+        style chain), since a paragraph style is allowed to supply ``numPr``
+        itself.
+        """
+
+        if properties.numbering_id is None:
+            return None
+        level = properties.numbering_level or 0
+        definition = next(
+            (item for item in numbering if item.numbering_id == properties.numbering_id),
+            None,
+        )
+        if definition is None:
+            return None
+        level_model = next((item for item in definition.levels if item.level == level), None)
+        if level_model is None:
+            return None
+        return level_model.paragraph
+
+    @staticmethod
+    def _merge_paragraph_properties(
+        base: ParagraphProperties,
+        override: ParagraphProperties,
+    ) -> ParagraphProperties:
+        """Layer ``override`` on top of ``base``, field by field.
+
+        Only fields the source XML actually set participate: unset fields on
+        either side fall through to whatever the next layer up provides.
+        """
+
+        values: dict[str, object] = base.model_dump(exclude_unset=True)
+        values.update(override.model_dump(exclude_unset=True))
+        return ParagraphProperties.model_validate(values)
 
     @staticmethod
     def _requested_font(properties: RunProperties, *, east_asia: bool) -> str:

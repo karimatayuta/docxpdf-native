@@ -16,6 +16,13 @@ tmp/pdfs/
 output/pdf/
 benchmark/results/
 
+# Real-world corpus fixtures: third-party documents are not redistributed.
+# Re-download them from the URLs in tests/fixtures/real_world/manifest.json.
+tests/fixtures/real_world/*.docx
+
+# Claude Code
+.claude/
+
 # OS
 .DS_Store
 

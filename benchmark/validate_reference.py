@@ -368,7 +368,7 @@ def _write_outputs(report: BenchmarkReport, output_root: Path) -> None:
     markdown = _markdown_report(report)
     (output_root / "report.md").write_text(markdown, encoding="utf-8")
     (output_root / "report.html").write_text(
-        "<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\">"
+        '<!doctype html><html lang="ja"><meta charset="utf-8">'
         "<title>docxpdf-native reference benchmark</title>"
         f"<body><pre>{html.escape(markdown)}</pre></body></html>\n",
         encoding="utf-8",
@@ -409,7 +409,8 @@ def _write_page_count_csv(report: BenchmarkReport, destination: Path) -> None:
                     "pdfinfo_pages": "",
                     "manual_visible_pages": "",
                     "status": document.status,
-                    "notes": document.failure or "; ".join(
+                    "notes": document.failure
+                    or "; ".join(
                         document.comparison.reasons if document.comparison is not None else ()
                     ),
                 }
@@ -444,9 +445,7 @@ def _markdown_report(report: BenchmarkReport) -> str:
     ]
     for document in report.documents:
         metadata_pages = (
-            str(document.docx_metadata_pages)
-            if document.docx_metadata_pages is not None
-            else "—"
+            str(document.docx_metadata_pages) if document.docx_metadata_pages is not None else "—"
         )
         candidate_pages = (
             str(document.candidate_pdf_pages)

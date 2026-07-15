@@ -114,6 +114,46 @@ def test_theme_font_resolver_maps_latin_and_east_asia_placeholders() -> None:
     assert ThemeFontResolver.resolve("+minorEastAsia", theme, east_asia=True) == "Minor Japanese"
 
 
+def test_theme_font_resolver_falls_back_to_latin_when_complex_script_is_unset() -> None:
+    # ``<a:cs typeface=""/>`` (or a missing <a:cs> element) parses to an
+    # unset major_complex_script/minor_complex_script -- Word itself then
+    # falls back to the scheme's Latin face rather than leaving the run
+    # without a resolvable font.
+    theme = ThemeFonts(major_latin="Cambria", minor_latin="Calibri")
+
+    assert ThemeFontResolver.resolve("+majorBidi", theme, east_asia=False) == "Cambria"
+    assert ThemeFontResolver.resolve("+minorBidi", theme, east_asia=False) == "Calibri"
+    assert ThemeFontResolver.resolve("+majorEastAsia", theme, east_asia=True) == "Cambria"
+
+
+def test_theme_font_resolver_never_returns_the_raw_placeholder_string() -> None:
+    # Even in the pathological case where the theme has no Latin face
+    # either, the unresolved "+major*"/"+minor*" placeholder must never be
+    # handed back as if it were a real font name.
+    theme = ThemeFonts()
+
+    assert ThemeFontResolver.resolve("+majorBidi", theme, east_asia=False) is None
+    assert ThemeFontResolver.resolve("+minorEastAsia", theme, east_asia=True) is None
+
+
+def test_style_resolver_resolves_theme_complex_script_font_via_latin_fallback() -> None:
+    resolver = OoxmlStyleResolver(
+        styles=(
+            StyleModel(
+                style_id="Body",
+                name="Body",
+                style_type="paragraph",
+                run=RunProperties(font_family="+majorBidi"),
+            ),
+        ),
+        theme_fonts=ThemeFonts(major_latin="Cambria"),
+    )
+
+    resolved = resolver.resolve(paragraph_style_id="Body")
+
+    assert resolved.run.font_family == "Cambria"
+
+
 def test_style_resolver_resolves_theme_font_properties() -> None:
     resolver = OoxmlStyleResolver(
         styles=(

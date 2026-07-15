@@ -151,7 +151,7 @@ def test_cli_builds_options_and_invokes_converter(
     assert "3 pages" in capsys.readouterr().out
 
 
-def test_strict_mode_is_the_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lenient_mode_is_the_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from docxpdf_native.cli import main
     from docxpdf_native.models import ConversionOptions
 
@@ -162,7 +162,7 @@ def test_strict_mode_is_the_default(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     options = calls["options"]
     assert isinstance(options, ConversionOptions)
-    assert options.strict is True
+    assert options.strict is False
 
 
 def test_strict_and_lenient_are_mutually_exclusive(

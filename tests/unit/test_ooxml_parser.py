@@ -7,12 +7,12 @@ import pytest
 
 from docxpdf_native.exceptions import (
     InvalidOoxmlError,
-    RelationshipError,
     ResourceLimitError,
     UnsupportedFeatureError,
 )
 from docxpdf_native.models.document import ParagraphModel, TableModel
 from docxpdf_native.models.options import ConversionOptions, ResourceLimits
+from docxpdf_native.ooxml.package import OoxmlPackage
 from docxpdf_native.ooxml.parser import OoxmlDocumentParser
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -22,6 +22,7 @@ CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+V_NS = "urn:schemas-microsoft-com:vml"
 
 
 def make_relationships(*items: tuple[str, str, str]) -> bytes:
@@ -126,6 +127,36 @@ def test_parser_reads_paragraph_runs_properties_and_section_geometry() -> None:
     assert paragraph.runs[1].tab is True
     assert paragraph.runs[2].break_type == "line"
     assert paragraph.runs[3].break_type == "page"
+
+
+def test_parser_reads_doc_grid_lines_type_and_line_pitch() -> None:
+    # 360 twips == 18pt; w:type="lines" is the default Japanese template's
+    # setting and is what makes Word snap line heights to the grid.
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body>
+      <w:p><w:r><w:t>x</w:t></w:r></w:p>
+      <w:sectPr>
+        <w:docGrid w:type="lines" w:linePitch="360"/>
+      </w:sectPr>
+    </w:body></w:document>""".encode()
+
+    model = OoxmlDocumentParser().parse(build_docx(document))
+
+    section = model.sections[0]
+    assert section.doc_grid_type == "lines"
+    assert section.doc_grid_line_pitch == 18.0
+
+
+def test_parser_defaults_doc_grid_when_absent() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body>
+      <w:p><w:r><w:t>x</w:t></w:r></w:p>
+      <w:sectPr/>
+    </w:body></w:document>""".encode()
+
+    model = OoxmlDocumentParser().parse(build_docx(document))
+
+    section = model.sections[0]
+    assert section.doc_grid_type == "default"
+    assert section.doc_grid_line_pitch is None
 
 
 def test_parser_splits_sections_at_paragraph_section_properties() -> None:
@@ -268,13 +299,26 @@ def test_parser_enforces_paragraph_limit() -> None:
         parser.parse(build_docx(document))
 
 
-def test_parser_uses_strict_unsupported_feature_policy_by_default() -> None:
+def test_parser_uses_lenient_unsupported_feature_policy_by_default() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body><w:p>
+      <w:r><w:t>kept</w:t></w:r><w:txbxContent><w:p/></w:txbxContent>
+      </w:p><w:sectPr/></w:body></w:document>""".encode()
+    parser = OoxmlDocumentParser()
+
+    model = parser.parse(build_docx(document))
+
+    assert model.sections[0].blocks[0].text == "kept"  # type: ignore[union-attr]
+    assert parser.unsupported_features[0].name == "text_box"
+    assert parser.warnings[0].code == "unsupported_feature"
+
+
+def test_parser_raises_in_strict_mode_for_genuinely_unsupported_content() -> None:
     document = f"""<w:document xmlns:w="{W_NS}"><w:body><w:p>
       <w:r><w:t>kept</w:t></w:r><w:txbxContent><w:p/></w:txbxContent>
       </w:p><w:sectPr/></w:body></w:document>""".encode()
 
     with pytest.raises(UnsupportedFeatureError) as caught:
-        OoxmlDocumentParser().parse(build_docx(document))
+        OoxmlDocumentParser().parse(build_docx(document), options=ConversionOptions(strict=True))
 
     assert caught.value.feature.name == "text_box"
 
@@ -299,9 +343,7 @@ def test_parser_ignores_vml_shape_defaults_in_settings() -> None:
       <w:hdrShapeDefaults><v:shape id="default-header-shape"/></w:hdrShapeDefaults>
     </w:settings>""".encode()
 
-    model = OoxmlDocumentParser().parse(
-        build_docx(document, {"word/settings.xml": settings})
-    )
+    model = OoxmlDocumentParser().parse(build_docx(document, {"word/settings.xml": settings}))
 
     assert len(model.sections) == 1
 
@@ -400,7 +442,7 @@ def test_parser_applies_unsupported_policy_to_binary_package_parts() -> None:
     data = build_docx(document, {"word/vbaProject.bin": b"macro"})
 
     with pytest.raises(UnsupportedFeatureError) as caught:
-        OoxmlDocumentParser().parse(data)
+        OoxmlDocumentParser().parse(data, options=ConversionOptions(strict=True))
 
     assert caught.value.feature.name == "macro"
 
@@ -634,6 +676,7 @@ def test_parser_rejects_malformed_auxiliary_ooxml_parts(
     [
         '<w:pgSz w:orient="sideways"/>',
         '<w:type w:val="unknown"/>',
+        '<w:docGrid w:type="unknown"/>',
     ],
 )
 def test_parser_rejects_invalid_section_properties(section_properties: str) -> None:
@@ -644,7 +687,15 @@ def test_parser_rejects_invalid_section_properties(section_properties: str) -> N
         OoxmlDocumentParser().parse(build_docx(document))
 
 
-def test_parser_disables_external_hyperlink_relationship_by_default() -> None:
+@pytest.mark.parametrize("allow_external_relationships", [False, True])
+def test_parser_renders_hyperlink_text_regardless_of_external_relationship_policy(
+    allow_external_relationships: bool,
+) -> None:
+    # External relationships (hyperlinks, in particular) are extremely common
+    # in real-world DOCX files and are never fetched, so their mere presence
+    # must never fail the conversion -- ``allow_external_relationships`` is
+    # retained on ConversionOptions for backward compatibility only and no
+    # longer changes this behavior.
     document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}"><w:body><w:p>
       <w:hyperlink r:id="rId9"><w:r><w:t>link text</w:t></w:r></w:hyperlink>
       </w:p><w:sectPr/></w:body></w:document>""".encode()
@@ -654,26 +705,73 @@ def test_parser_disables_external_hyperlink_relationship_by_default() -> None:
     ).encode()
     data = build_docx(document, {"word/_rels/document.xml.rels": relationships})
 
-    with pytest.raises(RelationshipError, match="External relationship"):
-        OoxmlDocumentParser().parse(data)
-
     paragraph = (
         OoxmlDocumentParser()
         .parse(
             data,
-            options=ConversionOptions(allow_external_relationships=True),
+            options=ConversionOptions(allow_external_relationships=allow_external_relationships),
         )
         .sections[0]
         .blocks[0]
     )
+
     assert isinstance(paragraph, ParagraphModel)
     assert paragraph.text == "link text"
 
 
-def test_parser_handles_external_image_through_unsupported_policy() -> None:
+def test_parser_tolerates_external_relationship_owned_by_an_auxiliary_part() -> None:
+    # A real-world failure mode: an external relationship (e.g. a hyperlink
+    # inside footnotes.xml) owned by a part other than word/document.xml must
+    # not fail the whole conversion either.
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body><w:p><w:r><w:t>body</w:t></w:r></w:p>
+      <w:sectPr/></w:body></w:document>""".encode()
+    footnotes_relationships = (
+        f'<Relationships xmlns="{PR_NS}"><Relationship Id="rId1" Type="{R_NS}/hyperlink" '
+        'Target="https://example.invalid/" TargetMode="External"/></Relationships>'
+    ).encode()
+    data = build_docx(
+        document,
+        {
+            "word/footnotes.xml": f'<w:footnotes xmlns:w="{W_NS}"/>'.encode(),
+            "word/_rels/footnotes.xml.rels": footnotes_relationships,
+        },
+    )
+
+    model = OoxmlDocumentParser().parse(data)
+
+    assert model.sections[0].blocks[0].text == "body"  # type: ignore[union-attr]
+
+
+def test_parser_never_fetches_external_relationship_targets() -> None:
+    # Presence is tolerated, but the target is still never resolved to a
+    # package part -- there is nothing to "fetch" because it never had bytes
+    # inside the DOCX to begin with.
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}"><w:body><w:p>
+      <w:hyperlink r:id="rId9"><w:r><w:t>link text</w:t></w:r></w:hyperlink>
+      </w:p><w:sectPr/></w:body></w:document>""".encode()
+    relationships = (
+        f'<Relationships xmlns="{PR_NS}"><Relationship Id="rId9" Type="{R_NS}/hyperlink" '
+        'Target="https://example.invalid/" TargetMode="External"/></Relationships>'
+    ).encode()
+    data = build_docx(document, {"word/_rels/document.xml.rels": relationships})
+
+    OoxmlDocumentParser().parse(data)
+
+    package = OoxmlPackage.open(data, allow_external_relationships=True)
+    relation = package.relationships_for("word/document.xml").by_id("rId9")
+    assert relation.is_external is True
+    assert relation.resolved_target is None
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_parser_replaces_external_image_with_same_size_placeholder(strict: bool) -> None:
+    # External bytes are never fetched, but the wp:extent size is still known
+    # from the markup, so the image's footprint is preserved as a
+    # placeholder instead of being silently dropped -- in both modes, since
+    # this degradation is always reported rather than ever being silent.
     document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}"
       xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" xmlns:pic="{PIC_NS}"><w:body><w:p><w:r>
-      <w:drawing><wp:inline><wp:extent cx="12700" cy="12700"/>
+      <w:drawing><wp:inline><wp:extent cx="127000" cy="63500"/>
       <a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId7"/>
       </pic:blipFill></pic:pic></a:graphicData></a:graphic>
       </wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
@@ -683,17 +781,17 @@ def test_parser_handles_external_image_through_unsupported_policy() -> None:
     ).encode()
     data = build_docx(document, {"word/_rels/document.xml.rels": relationships})
 
-    with pytest.raises(UnsupportedFeatureError) as caught:
-        OoxmlDocumentParser().parse(data)
-    assert caught.value.feature.name == "external_image"
-
     parser = OoxmlDocumentParser()
-    model = parser.parse(data, options=ConversionOptions(strict=False))
+    model = parser.parse(data, options=ConversionOptions(strict=strict))
     paragraph = model.sections[0].blocks[0]
+
     assert isinstance(paragraph, ParagraphModel)
-    assert paragraph.runs == ()
-    assert parser.warnings[0].feature is not None
-    assert parser.warnings[0].feature.name == "external_image"
+    placeholder = paragraph.runs[0].placeholder
+    assert placeholder is not None
+    assert placeholder.label == "[Image]"
+    assert (placeholder.width, placeholder.height) == (10.0, 5.0)
+    assert parser.warnings[0].code == "content_placeholder"
+    assert parser.unsupported_features[0].name == "content_placeholder"
 
 
 def test_parser_rejects_header_with_wrong_root_element() -> None:
@@ -752,10 +850,12 @@ def test_parser_wraps_invalid_model_value_as_ooxml_error() -> None:
         OoxmlDocumentParser().parse(build_docx(document))
 
 
-def test_parser_applies_unsupported_policy_to_non_png_jpeg_inline_image() -> None:
+def test_parser_replaces_undecodable_image_format_with_placeholder() -> None:
+    # SVG is neither a natively supported format nor Pillow-decodable, so it
+    # degrades to a same-size placeholder instead of raising or vanishing.
     document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}"
       xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" xmlns:pic="{PIC_NS}"><w:body><w:p><w:r>
-      <w:drawing><wp:inline><wp:extent cx="12700" cy="12700"/>
+      <w:drawing><wp:inline><wp:extent cx="12700" cy="25400"/>
       <a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId6"/>
       </pic:blipFill></pic:pic></a:graphicData></a:graphic>
       </wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
@@ -768,13 +868,389 @@ def test_parser_applies_unsupported_policy_to_non_png_jpeg_inline_image() -> Non
         },
     )
 
-    with pytest.raises(UnsupportedFeatureError) as caught:
-        OoxmlDocumentParser().parse(data)
-    assert caught.value.feature.name == "image_format"
+    parser = OoxmlDocumentParser()
+    model = parser.parse(data, options=ConversionOptions(strict=True))
+    paragraph = model.sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    placeholder = paragraph.runs[0].placeholder
+    assert placeholder is not None
+    assert (placeholder.label, placeholder.width, placeholder.height) == ("[Image]", 1.0, 2.0)
+    assert parser.unsupported_features[0].name == "content_placeholder"
+
+
+def test_parser_converts_gif_image_to_png_when_pillow_is_available() -> None:
+    pytest.importorskip("PIL")
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (2, 3), color=(10, 20, 30)).save(buffer, format="GIF")
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}"
+      xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" xmlns:pic="{PIC_NS}"><w:body><w:p><w:r>
+      <w:drawing><wp:inline><wp:extent cx="12700" cy="25400"/>
+      <a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId6"/>
+      </pic:blipFill></pic:pic></a:graphicData></a:graphic>
+      </wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
+    relation = make_relationships(("rId6", f"{R_NS}/image", "media/image.gif"))
+    data = build_docx(
+        document,
+        {
+            "word/_rels/document.xml.rels": relation,
+            "word/media/image.gif": buffer.getvalue(),
+        },
+    )
 
     parser = OoxmlDocumentParser()
-    model = parser.parse(data, options=ConversionOptions(strict=False))
+    model = parser.parse(data, options=ConversionOptions(strict=True))
     paragraph = model.sections[0].blocks[0]
+
     assert isinstance(paragraph, ParagraphModel)
-    assert paragraph.runs == ()
-    assert parser.unsupported_features[0].name == "image_format"
+    image = paragraph.runs[0].image
+    assert image is not None
+    assert image.content_type == "image/png"
+    assert image.data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert parser.unsupported_features == ()
+
+
+def test_parser_flattens_block_level_content_control() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body>
+      <w:sdt><w:sdtPr/><w:sdtContent>
+        <w:p><w:r><w:t>controlled</w:t></w:r></w:p>
+      </w:sdtContent></w:sdt>
+      <w:sectPr/>
+    </w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    assert paragraph.text == "controlled"
+
+
+def test_parser_flattens_nested_inline_content_controls() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body><w:p>
+      <w:r><w:t>before </w:t></w:r>
+      <w:sdt><w:sdtPr/><w:sdtContent>
+        <w:sdt><w:sdtPr/><w:sdtContent>
+          <w:r><w:t>nested</w:t></w:r>
+        </w:sdtContent></w:sdt>
+      </w:sdtContent></w:sdt>
+      <w:r><w:t> after</w:t></w:r>
+      </w:p><w:sectPr/></w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    assert paragraph.text == "before nested after"
+
+
+def test_parser_renders_inserted_text_and_drops_deleted_text() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body><w:p>
+      <w:ins w:id="1" w:author="A"><w:r><w:t>inserted </w:t></w:r></w:ins>
+      <w:del w:id="2" w:author="A"><w:r><w:delText>deleted </w:delText></w:r></w:del>
+      <w:r><w:t>kept</w:t></w:r>
+      </w:p><w:sectPr/></w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    assert paragraph.text == "inserted kept"
+
+
+def test_parser_replaces_complex_page_field_with_sentinel() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body><w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:t>3</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      </w:p><w:sectPr/></w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    assert [run.text for run in paragraph.runs] == ["{{PAGE}}"]
+
+
+def test_parser_renders_only_outermost_complex_field_result() -> None:
+    # { IF { PAGE } = 1 "First" "Other" } -- the inner PAGE field lives
+    # entirely inside the outer IF field's instruction, so its own cached
+    # result ("4") must never surface; only the outer's cached result does.
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body><w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> IF </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:t>4</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> = 1 "First" "Other" </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:t>First</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      </w:p><w:sectPr/></w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    assert [run.text for run in paragraph.runs] == ["First"]
+
+
+def test_parser_renders_other_complex_field_commands_as_cached_text() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}"><w:body><w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> AUTHOR </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:t>Jane Doe</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      </w:p><w:sectPr/></w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    assert paragraph.text == "Jane Doe"
+
+
+def test_parser_renders_vml_pict_image_from_style_dimensions() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}" xmlns:v="{V_NS}">
+      <w:body><w:p><w:r>
+      <w:pict><v:shape style="width:36pt;height:18pt"><v:imagedata r:id="rId5"/></v:shape></w:pict>
+      </w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
+    image = b"\x89PNG\r\n\x1a\ncontent"
+    relation = make_relationships(("rId5", f"{R_NS}/image", "media/image1.png"))
+
+    paragraph = (
+        OoxmlDocumentParser()
+        .parse(
+            build_docx(
+                document,
+                {
+                    "word/_rels/document.xml.rels": relation,
+                    "word/media/image1.png": image,
+                },
+            )
+        )
+        .sections[0]
+        .blocks[0]
+    )
+
+    assert isinstance(paragraph, ParagraphModel)
+    parsed_image = paragraph.runs[0].image
+    assert parsed_image is not None
+    assert (parsed_image.width, parsed_image.height) == (36.0, 18.0)
+    assert parsed_image.data == image
+
+
+@pytest.mark.parametrize(
+    ("style", "expected"),
+    [
+        ("width:1in;height:0.5in", (72.0, 36.0)),
+        ("width:2.54cm;height:1.27cm", (72.0, 36.0)),
+        ("width:96px;height:48px", (72.0, 36.0)),
+    ],
+)
+def test_parser_converts_vml_style_length_units_to_points(
+    style: str,
+    expected: tuple[float, float],
+) -> None:
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}" xmlns:v="{V_NS}">
+      <w:body><w:p><w:r>
+      <w:pict><v:shape style="{style}"><v:imagedata r:id="rId5"/></v:shape></w:pict>
+      </w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
+    relation = make_relationships(("rId5", f"{R_NS}/image", "media/image1.png"))
+
+    paragraph = (
+        OoxmlDocumentParser()
+        .parse(
+            build_docx(
+                document,
+                {
+                    "word/_rels/document.xml.rels": relation,
+                    "word/media/image1.png": b"\x89PNG\r\n\x1a\ncontent",
+                },
+            )
+        )
+        .sections[0]
+        .blocks[0]
+    )
+
+    assert isinstance(paragraph, ParagraphModel)
+    parsed_image = paragraph.runs[0].image
+    assert parsed_image is not None
+    assert (parsed_image.width, parsed_image.height) == expected
+
+
+def test_parser_replaces_ole_embedded_object_with_dimension_preserving_placeholder() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}" xmlns:v="{V_NS}">
+      <w:body><w:p><w:r>
+      <w:object>
+        <v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rId7"/></v:shape>
+      </w:object>
+      </w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
+    relation = make_relationships(("rId7", f"{R_NS}/image", "media/image1.emf"))
+
+    parser = OoxmlDocumentParser()
+    model = parser.parse(
+        build_docx(
+            document,
+            {
+                "word/_rels/document.xml.rels": relation,
+                "word/media/image1.emf": b"not a real emf",
+            },
+        )
+    )
+    paragraph = model.sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    placeholder = paragraph.runs[0].placeholder
+    assert placeholder is not None
+    assert placeholder.label == "[Embedded Object]"
+    assert (placeholder.width, placeholder.height) == (72.0, 36.0)
+    assert parser.unsupported_features[0].name == "content_placeholder"
+    assert parser.unsupported_features[0].status == "placeholder"
+
+
+def test_parser_falls_back_to_legacy_object_size_without_vml_style() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}" xmlns:v="{V_NS}">
+      <w:body><w:p><w:r>
+      <w:object w:dxaOrig="1440" w:dyaOrig="720">
+        <v:shape><v:imagedata r:id="rId7"/></v:shape>
+      </w:object>
+      </w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
+    relation = make_relationships(("rId7", f"{R_NS}/image", "media/image1.emf"))
+
+    model = OoxmlDocumentParser().parse(
+        build_docx(
+            document,
+            {
+                "word/_rels/document.xml.rels": relation,
+                "word/media/image1.emf": b"not a real emf",
+            },
+        )
+    )
+    paragraph = model.sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    placeholder = paragraph.runs[0].placeholder
+    assert placeholder is not None
+    assert (placeholder.width, placeholder.height) == (72.0, 36.0)
+
+
+def test_parser_does_not_stop_on_a_document_combining_legacy_constructs() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}" xmlns:v="{V_NS}"
+      xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" xmlns:pic="{PIC_NS}"><w:body>
+      <w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>controlled</w:t></w:r></w:p></w:sdtContent></w:sdt>
+      <w:p>
+        <w:ins w:id="1" w:author="A"><w:r><w:t>inserted </w:t></w:r></w:ins>
+        <w:del w:id="2" w:author="A"><w:r><w:delText>deleted </w:delText></w:r></w:del>
+        <w:r><w:t>kept</w:t></w:r>
+      </w:p>
+      <w:p>
+        <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+        <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+        <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+        <w:r><w:t>1</w:t></w:r>
+        <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      </w:p>
+      <w:p><w:r><w:pict><v:shape style="width:20pt;height:10pt">
+        <v:imagedata r:id="rIdVml"/></v:shape></w:pict></w:r></w:p>
+      <w:p><w:r><w:object><v:shape style="width:72pt;height:36pt">
+        <v:imagedata r:id="rIdOle"/></v:shape></w:object></w:r></w:p>
+      <w:sectPr/></w:body></w:document>""".encode()
+    relation = make_relationships(
+        ("rIdVml", f"{R_NS}/image", "media/vml-image.png"),
+        ("rIdOle", f"{R_NS}/image", "media/ole-preview.wmf"),
+    )
+    data = build_docx(
+        document,
+        {
+            "word/_rels/document.xml.rels": relation,
+            "word/media/vml-image.png": b"\x89PNG\r\n\x1a\ncontent",
+            "word/media/ole-preview.wmf": b"not a real wmf",
+        },
+    )
+
+    # Nothing here raises with the default (lenient) options: every kind of
+    # construct is either rendered natively or reserved as a placeholder.
+    parser = OoxmlDocumentParser()
+    model = parser.parse(data)
+    blocks = model.sections[0].blocks
+
+    assert [block.text for block in blocks[:3]] == ["controlled", "inserted kept", "{{PAGE}}"]  # type: ignore[union-attr]
+    assert blocks[3].runs[0].image is not None  # type: ignore[union-attr]
+    assert blocks[4].runs[0].placeholder is not None  # type: ignore[union-attr]
+    assert len(parser.unsupported_features) == 1
+    assert parser.unsupported_features[0].status == "placeholder"
+
+
+_CHART_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+_DIAGRAM_NS = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
+
+
+@pytest.mark.parametrize(
+    ("inner", "label"),
+    [
+        (f'<c:chart xmlns:c="{_CHART_NS}"/>', "[Chart]"),
+        (f'<dgm:relIds xmlns:dgm="{_DIAGRAM_NS}"/>', "[SmartArt]"),
+        ("<w:txbxContent/>", "[Text Box]"),
+        ("<w:noRecognizedMarker/>", "[Shape]"),
+    ],
+)
+def test_parser_labels_anchored_drawing_placeholders_by_content(inner: str, label: str) -> None:
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:wp="{WP_NS}" xmlns:a="{A_NS}">
+      <w:body><w:p><w:r>
+      <w:drawing><wp:anchor><wp:extent cx="127000" cy="63500"/>{inner}</wp:anchor></w:drawing>
+      </w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    placeholder = paragraph.runs[0].placeholder
+    assert placeholder is not None
+    assert placeholder.label == label
+
+
+def test_parser_labels_vml_textpath_shape_as_wordart_placeholder() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:v="{V_NS}">
+      <w:body><w:p><w:r>
+      <w:pict><v:shape style="width:100pt;height:20pt">
+        <v:textpath string="DRAFT"/></v:shape></w:pict>
+      </w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    placeholder = paragraph.runs[0].placeholder
+    assert placeholder is not None
+    assert placeholder.label == "[WordArt]"
+
+
+def test_parser_skips_vml_shape_when_no_usable_dimensions_are_found() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:v="{V_NS}">
+      <w:body><w:p>
+      <w:r><w:t>before</w:t></w:r>
+      <w:r><w:pict><v:shape style="width:bogus;height:bogus"/></w:pict></w:r>
+      <w:r><w:t>after</w:t></w:r>
+      </w:p><w:sectPr/></w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    assert paragraph.text == "beforeafter"
+
+
+def test_parser_falls_back_to_placeholder_when_image_relationship_is_missing() -> None:
+    document = f"""<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}"
+      xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" xmlns:pic="{PIC_NS}"><w:body><w:p><w:r>
+      <w:drawing><wp:inline><wp:extent cx="12700" cy="25400"/>
+      <a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rIdMissing"/>
+      </pic:blipFill></pic:pic></a:graphicData></a:graphic>
+      </wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>""".encode()
+
+    paragraph = OoxmlDocumentParser().parse(build_docx(document)).sections[0].blocks[0]
+
+    assert isinstance(paragraph, ParagraphModel)
+    placeholder = paragraph.runs[0].placeholder
+    assert placeholder is not None
+    assert placeholder.label == "[Image]"

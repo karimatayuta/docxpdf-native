@@ -23,6 +23,9 @@ class ResolvedFont(FrozenModel):
     postscript_name: str | None = None
     source: str
     substituted: bool = False
+    font_number: int | None = None
+    """Index into a TrueType/OpenType Collection (``.ttc``/``.otc``) at
+    ``path``; ``None`` for standalone font files."""
 
 
 class FontMetrics(FrozenModel):

@@ -13,6 +13,7 @@ from reportlab.pdfgen.canvas import Canvas
 
 from docxpdf_native.abstractions import PdfBackend
 from docxpdf_native.exceptions import PdfGenerationError
+from docxpdf_native.fonts.registry import FontRegistry
 from docxpdf_native.models.document import BorderModel
 from docxpdf_native.models.layout import (
     CellBox,
@@ -20,8 +21,11 @@ from docxpdf_native.models.layout import (
     LayoutDocument,
     PageModel,
     ParagraphBox,
+    PlaceholderBox,
     TableBox,
 )
+
+_COLLECTION_SUFFIXES = frozenset({".ttc", ".otc"})
 
 
 class ReportLabPdfBackend(PdfBackend):
@@ -62,7 +66,18 @@ class ReportLabPdfBackend(PdfBackend):
 
     def _register_fonts(self) -> None:
         for font_name, font_path in self._font_paths:
-            pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+            if font_path.suffix.lower() in _COLLECTION_SUFFIXES:
+                # Only a flat {family: path} mapping survives to this point, so
+                # the collection face (subfontIndex) is re-derived from the file
+                # itself. FontRegistry only ever indexes embeddable (TrueType
+                # glyf-outline) faces, so any match here is safe to register.
+                face = FontRegistry.resolve_face(font_path, font_name)
+                subfont_index = face.font_number if face is not None else None
+                pdfmetrics.registerFont(
+                    TTFont(font_name, str(font_path), subfontIndex=subfont_index or 0)
+                )
+            else:
+                pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
 
     @staticmethod
     def _draw_page(pdf: Canvas, page: PageModel) -> None:
@@ -70,6 +85,9 @@ class ReportLabPdfBackend(PdfBackend):
         for block in (*page.header, *page.body, *page.footer):
             if isinstance(block, ImageBox):
                 ReportLabPdfBackend._draw_image(pdf, page, block)
+                continue
+            if isinstance(block, PlaceholderBox):
+                ReportLabPdfBackend._draw_placeholder(pdf, page, block)
                 continue
             if isinstance(block, TableBox):
                 for cell in block.cells:
@@ -88,6 +106,8 @@ class ReportLabPdfBackend(PdfBackend):
                             ReportLabPdfBackend._draw_paragraph(pdf, page, cell_block)
                         elif isinstance(cell_block, ImageBox):
                             ReportLabPdfBackend._draw_image(pdf, page, cell_block)
+                        elif isinstance(cell_block, PlaceholderBox):
+                            ReportLabPdfBackend._draw_placeholder(pdf, page, cell_block)
                     ReportLabPdfBackend._draw_cell_borders(pdf, page, cell)
                 ReportLabPdfBackend._draw_table_borders(pdf, page, block)
                 continue
@@ -102,6 +122,9 @@ class ReportLabPdfBackend(PdfBackend):
             for fragment in line.fragments:
                 if isinstance(fragment, ImageBox):
                     ReportLabPdfBackend._draw_image(pdf, page, fragment)
+                    continue
+                if isinstance(fragment, PlaceholderBox):
+                    ReportLabPdfBackend._draw_placeholder(pdf, page, fragment)
                     continue
                 text_baseline = baseline_y + fragment.baseline_shift
                 text_color = HexColor(f"#{fragment.color.lstrip('#')}")
@@ -155,6 +178,32 @@ class ReportLabPdfBackend(PdfBackend):
             width=image.width,
             height=image.height,
             mask="auto",
+        )
+
+    @staticmethod
+    def _draw_placeholder(pdf: Canvas, page: PageModel, box: PlaceholderBox) -> None:
+        """Draw a same-size stand-in rectangle for unrenderable content.
+
+        Reserves the original element's footprint (so pagination matches the
+        source document) with a light neutral box and a short label instead
+        of silently dropping the content or raising an error.
+        """
+
+        left = box.x
+        top = page.height - box.y
+        bottom = top - box.height
+        pdf.setFillColor(HexColor("#F2F2F2"))
+        pdf.setStrokeColor(HexColor("#999999"))
+        pdf.setLineWidth(0.75)
+        pdf.setDash()
+        pdf.rect(left, bottom, box.width, box.height, stroke=1, fill=1)
+        if not box.label or box.width <= 4 or box.height <= 4:
+            return
+        font_size = max(4.0, min(9.0, box.height * 0.28))
+        pdf.setFillColor(HexColor("#666666"))
+        pdf.setFont("Helvetica", font_size)
+        pdf.drawCentredString(
+            left + box.width / 2, bottom + box.height / 2 - font_size * 0.35, box.label
         )
 
     @staticmethod

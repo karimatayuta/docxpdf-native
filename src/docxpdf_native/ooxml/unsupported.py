@@ -57,7 +57,15 @@ class LenientUnsupportedFeatureHandler(UnsupportedFeatureHandler):
 
 
 class UnsupportedFeatureDetector:
-    """Detect known unsupported OOXML constructs before model generation."""
+    """Detect known unsupported OOXML constructs before model generation.
+
+    Constructs the parser now renders natively (content controls, tracked
+    changes, complex fields, VML/OLE images, anchored drawings) are
+    intentionally absent from ``_RULES``: they are no longer "unsupported",
+    they degrade gracefully (rendered content or a same-size placeholder)
+    and are reported through the parser's own placeholder diagnostics
+    instead of this pre-scan, so they never block strict mode.
+    """
 
     _RULES: ClassVar[dict[str, tuple[str, str | None]]] = {
         OoxmlNamespaces.qn("w", "txbxContent"): (
@@ -80,14 +88,6 @@ class UnsupportedFeatureDetector:
             "chart",
             "Replace the chart with an inline PNG or JPEG image.",
         ),
-        OoxmlNamespaces.qn("w", "object"): (
-            "embedded_object",
-            "Replace the embedded object with ordinary text or an inline image.",
-        ),
-        OoxmlNamespaces.qn("o", "OLEObject"): (
-            "ole",
-            "Remove the OLE object or replace it with an inline image.",
-        ),
         OoxmlNamespaces.qn("m", "oMath"): (
             "math",
             "Replace the equation with text or an inline image.",
@@ -99,26 +99,6 @@ class UnsupportedFeatureDetector:
         OoxmlNamespaces.qn("v", "textpath"): (
             "word_art",
             "Replace WordArt with ordinary text or an inline image.",
-        ),
-        OoxmlNamespaces.qn("v", "shape"): (
-            "floating_shape",
-            "Replace the floating shape with an inline PNG or JPEG image.",
-        ),
-        OoxmlNamespaces.qn("v", "group"): (
-            "floating_shape",
-            "Replace the floating shape group with an inline PNG or JPEG image.",
-        ),
-        OoxmlNamespaces.qn("wps", "wsp"): (
-            "floating_shape",
-            "Replace the floating shape with an inline PNG or JPEG image.",
-        ),
-        OoxmlNamespaces.qn("wpg", "wgp"): (
-            "floating_shape",
-            "Replace the floating shape group with an inline PNG or JPEG image.",
-        ),
-        OoxmlNamespaces.qn("wp", "anchor"): (
-            "anchor_image",
-            "Change the floating object to an inline image.",
         ),
         OoxmlNamespaces.qn("w", "ruby"): (
             "ruby",
@@ -140,22 +120,6 @@ class UnsupportedFeatureDetector:
             "complex_arabic_shaping",
             "Convert the complex-script run to pre-shaped text or an image.",
         ),
-        OoxmlNamespaces.qn("w", "ins"): (
-            "tracked_changes",
-            "Accept or reject tracked changes before conversion.",
-        ),
-        OoxmlNamespaces.qn("w", "del"): (
-            "tracked_changes",
-            "Accept or reject tracked changes before conversion.",
-        ),
-        OoxmlNamespaces.qn("w", "moveFrom"): (
-            "tracked_changes",
-            "Accept or reject tracked changes before conversion.",
-        ),
-        OoxmlNamespaces.qn("w", "moveTo"): (
-            "tracked_changes",
-            "Accept or reject tracked changes before conversion.",
-        ),
         OoxmlNamespaces.qn("w", "commentReference"): (
             "comments",
             "Remove comments or render a clean document copy.",
@@ -168,10 +132,6 @@ class UnsupportedFeatureDetector:
             "comments",
             "Remove comments or render a clean document copy.",
         ),
-        OoxmlNamespaces.qn("w", "sdt"): (
-            "content_control",
-            "Replace the content control with ordinary document content.",
-        ),
         OoxmlNamespaces.qn("w", "footnoteReference"): (
             "footnotes",
             "Move footnote text into the document body.",
@@ -179,14 +139,6 @@ class UnsupportedFeatureDetector:
         OoxmlNamespaces.qn("w", "endnoteReference"): (
             "endnotes",
             "Move endnote text into the document body.",
-        ),
-        OoxmlNamespaces.qn("w", "fldChar"): (
-            "complex_field",
-            "Replace the field with static text or a simple PAGE/NUMPAGES field.",
-        ),
-        OoxmlNamespaces.qn("w", "instrText"): (
-            "complex_field",
-            "Replace the field with static text or a simple PAGE/NUMPAGES field.",
         ),
     }
 
@@ -212,7 +164,13 @@ class UnsupportedFeatureDetector:
             )
 
     def scan_package(self, package: OoxmlPackage) -> None:
-        """Detect unsupported binary/auxiliary parts and external images."""
+        """Detect unsupported binary/auxiliary parts.
+
+        Embedded-object binaries and non-PNG/JPEG image relationships are no
+        longer flagged here: the parser now resolves them into rendered
+        images or same-size placeholders, with degradation reported through
+        its own placeholder diagnostics regardless of strict/lenient mode.
+        """
 
         exact_parts = {
             "word/vbaProject.bin": (
@@ -221,10 +179,6 @@ class UnsupportedFeatureDetector:
             ),
         }
         prefix_parts = {
-            "word/embeddings/": (
-                "embedded_object",
-                "Replace the embedded object with ordinary text or an inline image.",
-            ),
             "word/charts/": (
                 "chart",
                 "Replace the chart with an inline PNG or JPEG image.",
@@ -257,37 +211,6 @@ class UnsupportedFeatureDetector:
                 )
             )
 
-        for relation_set in package.relationship_sets.values():
-            for relation in relation_set.relationships:
-                if not relation.relationship_type.endswith("/image"):
-                    continue
-                if relation.is_external:
-                    self._handler.handle(
-                        UnsupportedFeature(
-                            name="external_image",
-                            part=relation.source_part,
-                            element="Relationship",
-                            location=f"relationship:{relation.relationship_id}",
-                            workaround="Embed the image inside the DOCX package.",
-                        )
-                    )
-                    continue
-                target = relation.resolved_target
-                if target is None:
-                    continue
-                content_type = package.content_types.for_part(target)
-                if content_type in {"image/png", "image/jpeg", "image/jpg"}:
-                    continue
-                self._handler.handle(
-                    UnsupportedFeature(
-                        name="image_format",
-                        part=relation.source_part,
-                        element="Relationship",
-                        location=f"relationship:{relation.relationship_id}",
-                        workaround="Convert the image to PNG or JPEG and embed it again.",
-                    )
-                )
-
     @classmethod
     def _feature_for(cls, element: Element) -> tuple[str, str | None] | None:
         if element.tag == OoxmlNamespaces.qn("w", "textDirection"):
@@ -309,17 +232,6 @@ class UnsupportedFeatureDetector:
             return (
                 "multiple_columns",
                 "Change the section to a single text column.",
-            )
-        if element.tag == OoxmlNamespaces.qn("w", "fldSimple"):
-            instruction = element.get(OoxmlNamespaces.qn("w", "instr"), "")
-            command = (
-                instruction.strip().split(maxsplit=1)[0].upper() if instruction.strip() else ""
-            )
-            if command in {"PAGE", "NUMPAGES"}:
-                return None
-            return (
-                "complex_field",
-                "Replace the field with static text or a simple PAGE/NUMPAGES field.",
             )
         return cls._RULES.get(element.tag)
 

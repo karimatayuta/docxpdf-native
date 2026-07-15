@@ -1,0 +1,312 @@
+{
+  "description": "docxpdf-native の実地テスト用に収集した実世界DOCXファイル集。古い世代のWordファイル(埋め込みオブジェクト・OLE・フィールドコード・VML画像・SDT・変更履歴など)でのレンダリング崩れ/エラー停止を検証するためのフィクスチャ。",
+  "retrieved_date": "2026-07-15",
+  "collection_criteria": {
+    "min_pages": 10,
+    "target_era": "2007-2014年頃のWord(AppVersion 12.0000/14.0000相当)を優先。入手困難だったため一部は新しいAppVersionだが難要素を多く含むものを補完的に採用。",
+    "language_target": "半数程度を日本語に"
+  },
+  "files": [
+    {
+      "filename": "001_who_zaf_breast_cancer_guidelines.docx",
+      "source_url": "https://extranet.who.int/ncdccs/Data/ZAF_D1aic_Final%20breast%20cancer%20guidelines.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "2aab0a64237674ad57169ba9c92893cf08344ed26c7330fbd034fae8b2618066",
+      "file_size": 5733924,
+      "app_pages": 123,
+      "app_version": "12.0000",
+      "language": "en",
+      "description": "WHO/南アフリカ 乳がん管理に関する臨床ガイドライン(NCD Country Capacity Survey収集資料)",
+      "features": [
+        "field_codes",
+        "vml_pict",
+        "emf_images",
+        "gif_images",
+        "comments"
+      ],
+      "feature_counts": {
+        "fldChar": 522,
+        "w_pict": 20,
+        "emf_files": 9,
+        "gif_files": 1
+      }
+    },
+    {
+      "filename": "002_eba_finrep_instructions.docx",
+      "source_url": "https://www.eba.europa.eu/documents/10180/359626/26727402-6339-4c33-bb5a-d8e659c27371/Annex%20V_Instructions_FINREP.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "fbc341d42dfee4c8d3923e662e19a84b6520b79615b371b112fc74b9e657c7d8",
+      "file_size": 107418,
+      "app_pages": 38,
+      "app_version": "12.0000",
+      "language": "en",
+      "description": "欧州銀行監督機構(EBA) FINREP財務報告 記入指示書 別紙V",
+      "features": [
+        "field_codes"
+      ],
+      "feature_counts": {
+        "fldChar": 438
+      }
+    },
+    {
+      "filename": "003_shiga_bousai_gijiroku.docx",
+      "source_url": "https://www.pref.shiga.lg.jp/file/attachment/5111831.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "b20d8708e6f9915633fd18e964ff9a3a553ba3e237a299711bcddadd7e77e5a4",
+      "file_size": 92169,
+      "app_pages": 35,
+      "app_version": "14.0000",
+      "language": "ja",
+      "description": "滋賀県 第1回 女性の参画による防災力向上検討懇話会 議事録",
+      "features": [
+        "footnotes"
+      ],
+      "feature_counts": {
+        "fldChar": 0,
+        "w_pict": 0
+      }
+    },
+    {
+      "filename": "004_who_nam_hypertension_guidelines.docx",
+      "source_url": "https://extranet.who.int/ncdccs/Data/NAM_D1_Guidelines%20for%20Management%20of%20Hypertension.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "e247d19270c51f4ff7f540877949fc97b672d289230c8a7319449a8512a7babf",
+      "file_size": 131241,
+      "app_pages": 26,
+      "app_version": "15.0000",
+      "language": "en",
+      "description": "WHO/ナミビア 高血圧管理ガイドライン(NCD Country Capacity Survey収集資料)",
+      "features": [
+        "vml_pict",
+        "wmf_images"
+      ],
+      "feature_counts": {
+        "w_pict": 96,
+        "wmf_files": 1
+      }
+    },
+    {
+      "filename": "005_who_png_ncd_strategic_plan.docx",
+      "source_url": "https://extranet.who.int/ncdccs/Data/PNG_B3_Non%20Communicable%20Diseases%20Multisecotoral%20Strategic%20Plan%202015-2020.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "13882e1f35a83e9e91c2c52136abb6d2a543b5ea4fad0d0a1d7ec4b306053923",
+      "file_size": 156124,
+      "app_pages": 32,
+      "app_version": "12.0000",
+      "language": "en",
+      "description": "WHO/パプアニューギニア 非感染性疾患マルチセクター戦略計画2015-2020",
+      "features": [
+        "field_codes",
+        "vml_pict",
+        "sdt",
+        "emf_images"
+      ],
+      "feature_counts": {
+        "fldChar": 72,
+        "w_pict": 2,
+        "w_sdt": 1,
+        "emf_files": 1
+      }
+    },
+    {
+      "filename": "006_hiroshima_covid_guideline_trackedchanges.docx",
+      "source_url": "https://chotatsu.pref.hiroshima.lg.jp/file/kakudaibousi_8_miekesi.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "6fd3553aadcc8771dad700de227724c338b781e89afb751c1082e633806f04f2",
+      "file_size": 65998,
+      "app_pages": 15,
+      "app_version": "16.0000",
+      "language": "ja",
+      "description": "広島県 建設業における新型コロナウイルス感染予防対策ガイドライン(見え消し=変更履歴付き版)",
+      "features": [
+        "tracked_changes",
+        "footnotes",
+        "field_codes",
+        "vml_pict"
+      ],
+      "feature_counts": {
+        "w_ins": 66,
+        "w_del": 34,
+        "fldChar": 6,
+        "w_pict": 6
+      }
+    },
+    {
+      "filename": "007_kashiwa_suicide_profile.docx",
+      "source_url": "https://www.city.kashiwa.lg.jp/r3-archive/soshiki/060200/p047283_d/fil/siryou2.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "86e4ec85216cad70facec8300b1f20111f6416faf102774208758273dd0e7afb",
+      "file_size": 112645,
+      "app_pages": 16,
+      "app_version": null,
+      "language": "ja",
+      "description": "千葉県柏市 地域自殺実態プロファイル2017(抜粋版)。Kingsoft Office(WPS)で作成されたためAppVersion欠落。Microsoft Word以外の実装で生成されたOOXMLの互換性テストに有用。",
+      "features": [
+        "vml_pict",
+        "non_ms_producer"
+      ],
+      "feature_counts": {
+        "w_pict": 10
+      },
+      "producer_application": "Kingsoft Office Professional 9.1.0.4917",
+      "app_pages_reliable": false,
+      "note": "Kingsoft Office製のためdocProps/app.xmlのPages=16は信頼できない(Words=2148・PNG4枚・明示改ページ3個で実質5ページ前後が妥当)。ページ数の参照値検証からは除外し、エラーなし変換のみ検証する。"
+    },
+    {
+      "filename": "008_funabashi_shisetu_checklist.docx",
+      "source_url": "https://www.city.funabashi.lg.jp/jigyou/fukushi_kosodate/002/05/p023823_d/fil/sisetu.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "fe02f4d6c75af4df42f2c67788f492532e6230e82ce54b3a9e06c442b3da71cc",
+      "file_size": 53734,
+      "app_pages": 23,
+      "app_version": "16.0000",
+      "language": "ja",
+      "description": "船橋市 指定障害福祉サービス事業者等指導調書(障害者支援施設向けチェックリスト)",
+      "features": [
+        "footnotes",
+        "vml_pict"
+      ],
+      "feature_counts": {
+        "w_pict": 2
+      }
+    },
+    {
+      "filename": "009_obu_bousai_manual.docx",
+      "source_url": "https://www.city.obu.aichi.jp/_res/projects/default_project/_page_/001/001/949/170210jigyosyomanyuaru.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "02ea75f0c93fb4b7be3c2ac0815f3ce5ddf4d8e5219acb4004083c5a6b39450e",
+      "file_size": 190011,
+      "app_pages": 18,
+      "app_version": "14.0000",
+      "language": "ja",
+      "description": "愛知県大府市 事業所の防災マニュアル作成例。VML画像(w:pict)を大量に含む。",
+      "features": [
+        "footnotes",
+        "vml_pict"
+      ],
+      "feature_counts": {
+        "w_pict": 210
+      }
+    },
+    {
+      "filename": "010_zenhokan_houmonkango_bcp.docx",
+      "source_url": "https://www.zenhokan.or.jp/wp-content/uploads/r2-1-3s.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "6703d8853c68f0504be4e124eb252703823bfc9a15151cc8f52dc075eadc3c20",
+      "file_size": 1676587,
+      "app_pages": 53,
+      "app_version": "16.0000",
+      "language": "ja",
+      "description": "一般社団法人全国訪問看護事業協会 自然災害発生時における業務継続計画(BCP)訪問看護ステーション向け雛形。目次・大量の相互参照フィールドコードを含む。",
+      "features": [
+        "field_codes",
+        "sdt",
+        "footnotes"
+      ],
+      "feature_counts": {
+        "fldChar": 1002,
+        "w_sdt": 1
+      }
+    },
+    {
+      "filename": "011_eba_corep_annex_instructions.docx",
+      "source_url": "https://www.eba.europa.eu/sites/default/files/documents/10180/2321374/7820f890-2a26-46be-ae3e-6e73fa52036a/Annex%202%20to%20CP%20on%20COREP%20-%20Annex%20II%20(instructions).docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "d15355293f2349281896d3694792579712510eb08b381f8385dd107c4b138228",
+      "file_size": 395409,
+      "app_pages": 207,
+      "app_version": "16.0000",
+      "language": "en",
+      "description": "欧州銀行監督機構(EBA) COREP自己資本規制報告 記入指示書 別紙II。207ページ・大量のフィールドコードを含む大規模文書(補完的にAppVersionは新しいが負荷テストとして採用)。",
+      "features": [
+        "field_codes"
+      ],
+      "feature_counts": {
+        "fldChar": 744
+      },
+      "note": "old_generationの優先条件からは外れるが、ページ数・フィールドコード密度が突出しているため負荷テスト用に補完採用"
+    },
+    {
+      "filename": "012_nasa_std871913c_change2_embedded.docx",
+      "source_url": "https://standards.nasa.gov/sites/default/files/standards/NASA/C-Change-2/0/nasa-std-871913c_with_change_2.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "1ad1cb0938ca81f46a61220938525fed79ea0345d3165bee9b3e063c82f87721",
+      "file_size": 709788,
+      "app_pages": 61,
+      "app_version": "16.0000",
+      "language": "en",
+      "description": "NASA-STD-8719.13C (Change 2) Software Safety Standard。word/embeddings/ に埋め込みWord文書7個・埋め込みExcelワークシート5個(計12個のo:OLEObject)を含む本命候補。ページ数・OLE埋め込みの両条件を満たす。",
+      "features": [
+        "ole_embeddings",
+        "embedded_word_docs",
+        "embedded_excel_sheets"
+      ],
+      "feature_counts": {
+        "ole_object_tags": 12,
+        "embedded_docx": 7,
+        "embedded_xlsx": 5
+      }
+    },
+    {
+      "filename": "013_nasa_std871913c_embedded_container.docx",
+      "source_url": "https://standards.nasa.gov/sites/default/files/standards/NASA/C/0/nasa-std-871913c.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "6e9ed79c796f4154c99454fd3788061cc64cfceec8d1979e9df45626cd79019d",
+      "file_size": 708682,
+      "app_pages": 1,
+      "app_version": "15.0000",
+      "language": "en",
+      "description": "NASA-STD-8719.13C Software Safety Standard(Change 2適用前リビジョン)。012とほぼ同一の本文+埋め込みWord文書7個・Excelワークシート5個(計12個のOLEObject)。",
+      "features": [
+        "ole_embeddings",
+        "embedded_word_docs",
+        "embedded_excel_sheets"
+      ],
+      "feature_counts": {
+        "ole_object_tags": 12,
+        "embedded_docx": 7,
+        "embedded_xlsx": 5
+      },
+      "note": "app.xmlのPages=1は古いページネーションキャッシュで信頼できない。Words=21,972/Characters=125,242と012とほぼ同一の本文量を持ち、「本文は改訂履歴のみで1ページ」という当初の記載は誤認。ページ数の参照値検証からは除外し、エラーなし変換のみ検証する。",
+      "app_pages_reliable": false
+    },
+    {
+      "filename": "014_kagoshima_math_equation_ole.docx",
+      "source_url": "https://www.sci.kagoshima-u.ac.jp/shinmori/word-math1.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "d665bab259ca7a0f44e3a09cd166b86fb283dab3e576a3c9018f7e61235d1c86",
+      "file_size": 27729,
+      "app_pages": 1,
+      "app_version": "14.0000",
+      "language": "ja",
+      "description": "鹿児島大学 理学部「数式エディタ」講義資料。word/embeddings/oleObject1〜3.bin(OLE2 CFB形式、Microsoft数式3.0と推定)を含む、Word 2010(AppVersion 14.0000)由来の古典的OLEオブジェクト埋め込みサンプル。",
+      "features": [
+        "ole_embeddings",
+        "old_style_ole_cfb"
+      ],
+      "feature_counts": {
+        "ole_bin_files": 3
+      },
+      "note": "app_pages=1だが真正のOLE2 CFB形式(マジックナンバーD0CF11E0確認済み)の埋め込みオブジェクトを含むため優先採用。"
+    },
+    {
+      "filename": "015_kagoshima_wordpoint_ole.docx",
+      "source_url": "https://www.sci.kagoshima-u.ac.jp/shinmori/word-point.docx",
+      "retrieved_date": "2026-07-15",
+      "sha256": "5d35a57760af23df27c5d397120bbb0412334229e4cc07c80e53f692aafcfc89",
+      "file_size": 28968,
+      "app_pages": 1,
+      "app_version": "14.0000",
+      "language": "ja",
+      "description": "鹿児島大学 理学部「Wordの資料1：文書作成のポイント」講義資料。014と同一著者・同一講座の資料で、word/embeddings/oleObject1〜3.bin(OLE2 CFB形式)を含む。",
+      "features": [
+        "ole_embeddings",
+        "old_style_ole_cfb"
+      ],
+      "feature_counts": {
+        "ole_bin_files": 3
+      },
+      "note": "app_pages=1だが真正のOLE2 CFB形式の埋め込みオブジェクトを含むため優先採用。014の姉妹ファイル。"
+    }
+  ]
+}

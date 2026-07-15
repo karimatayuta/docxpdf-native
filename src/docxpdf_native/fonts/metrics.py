@@ -9,9 +9,12 @@ from reportlab.pdfbase import pdfmetrics
 
 from docxpdf_native.abstractions import TextMeasurer
 from docxpdf_native.exceptions import FontNotFoundError
+from docxpdf_native.fonts.registry import FontRegistry
 from docxpdf_native.layout.japanese_breaking import UnicodeText
 from docxpdf_native.models.base import FrozenModel
 from docxpdf_native.models.fonts import ResolvedFont, TextMeasurement
+
+_COLLECTION_SUFFIXES = frozenset({".ttc", ".otc"})
 
 
 class _LoadedFont(FrozenModel):
@@ -27,9 +30,9 @@ class FontToolsTextMeasurer(TextMeasurer):
     """Measure standard PDF fonts or concrete OpenType/TrueType glyph metrics."""
 
     def __init__(self) -> None:
-        self._font_cache: dict[Path, _LoadedFont] = {}
+        self._font_cache: dict[tuple[Path, int | None], _LoadedFont] = {}
         self._measurement_cache: dict[
-            tuple[str, str, str | None, float, float], TextMeasurement
+            tuple[str, str, str | None, int | None, float, float], TextMeasurement
         ] = {}
 
     def measure(
@@ -46,7 +49,8 @@ class FontToolsTextMeasurer(TextMeasurer):
             raise ValueError("character_spacing must be finite")
         normalized = UnicodeText.normalize(text)
         path_key = str(font.path) if font.path is not None else None
-        key = (normalized, font.family, path_key, font_size, character_spacing)
+        font_number = self._resolve_font_number(font)
+        key = (normalized, font.family, path_key, font_number, font_size, character_spacing)
         cached = self._measurement_cache.get(key)
         if cached is not None:
             return cached
@@ -54,13 +58,32 @@ class FontToolsTextMeasurer(TextMeasurer):
         if font.path is None:
             measured = self._measure_standard(normalized, font, font_size)
         else:
-            measured = self._measure_file(normalized, font.path, font_size)
+            measured = self._measure_file(normalized, font.path, font_number, font_size)
 
         cluster_count = len(UnicodeText.grapheme_clusters(normalized))
         spacing = max(cluster_count - 1, 0) * character_spacing
         result = measured.model_copy(update={"width": max(measured.width + spacing, 0.0)})
         self._measurement_cache[key] = result
         return result
+
+    @staticmethod
+    def _resolve_font_number(font: ResolvedFont) -> int | None:
+        """Determine which face of a collection ``font.path`` refers to.
+
+        ``font.font_number`` is authoritative when present (the common case:
+        a :class:`~docxpdf_native.fonts.resolver.DefaultFontResolver` result
+        used directly). When it is missing -- for example a
+        :class:`ResolvedFont` reconstructed further down the pipeline from
+        just a family name and path -- the face is re-derived from the file
+        itself so collection metrics are never silently read from the wrong
+        face (which defaults to index 0).
+        """
+        if font.path is None or font.path.suffix.lower() not in _COLLECTION_SUFFIXES:
+            return None
+        if font.font_number is not None:
+            return font.font_number
+        face = FontRegistry.resolve_face(font.path, font.family)
+        return face.font_number if face is not None else 0
 
     @staticmethod
     def _measure_standard(text: str, font: ResolvedFont, font_size: float) -> TextMeasurement:
@@ -80,11 +103,14 @@ class FontToolsTextMeasurer(TextMeasurer):
             descent=abs(float(descent)),
         )
 
-    def _measure_file(self, text: str, path: Path, font_size: float) -> TextMeasurement:
-        data = self._font_cache.get(path)
+    def _measure_file(
+        self, text: str, path: Path, font_number: int | None, font_size: float
+    ) -> TextMeasurement:
+        cache_key = (path, font_number)
+        data = self._font_cache.get(cache_key)
         if data is None:
-            data = self._load_font(path)
-            self._font_cache[path] = data
+            data = self._load_font(path, font_number)
+            self._font_cache[cache_key] = data
         advance_units = 0
         for character in text:
             codepoint = ord(character)
@@ -100,9 +126,9 @@ class FontToolsTextMeasurer(TextMeasurer):
         )
 
     @staticmethod
-    def _load_font(path: Path) -> _LoadedFont:
+    def _load_font(path: Path, font_number: int | None) -> _LoadedFont:
         try:
-            with TTFont(path, lazy=False) as font:
+            with TTFont(path, lazy=False, fontNumber=font_number or 0) as font:
                 units_per_em = int(font["head"].unitsPerEm)
                 hhea = font["hhea"]
                 raw_metrics = font["hmtx"].metrics

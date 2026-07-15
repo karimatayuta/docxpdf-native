@@ -19,8 +19,21 @@ class ResourceLimits(FrozenModel):
 
 
 class ConversionOptions(FrozenModel):
-    strict: bool = True
+    # Real-world DOCX files, especially older ones, routinely contain
+    # constructs this library cannot render pixel-perfectly (embedded OLE
+    # objects, EMF/WMF previews, exotic image formats, ...).  The default is
+    # lenient: convert everything it can, degrade the rest to same-size
+    # placeholders, and report every degradation as a warning.  Pass
+    # ``strict=True`` to instead fail fast the moment anything would not be
+    # rendered with full fidelity.
+    strict: bool = False
     deterministic: bool = True
     font_configuration: FontConfiguration = Field(default_factory=FontConfiguration)
     resource_limits: ResourceLimits = Field(default_factory=ResourceLimits)
+    # External relationships (hyperlinks to outside URLs, external OLE
+    # targets, and similar) are extremely common in real-world DOCX files
+    # and are always tolerated: parsing never fetches an external target's
+    # bytes regardless of this flag, so there is no remaining behavior for
+    # it to gate. The field is kept for backward API compatibility with
+    # earlier releases that used it to lift a hard rejection.
     allow_external_relationships: bool = False

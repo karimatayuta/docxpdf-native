@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import unicodedata
+from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import BinaryIO, Literal
@@ -24,6 +26,7 @@ from docxpdf_native.models.document import (
     NumberingDefinition,
     NumberingLevel,
     ParagraphModel,
+    PlaceholderModel,
     RunModel,
     SectionModel,
     TableBorders,
@@ -36,6 +39,7 @@ from docxpdf_native.models.results import ConversionWarning, UnsupportedFeature
 from docxpdf_native.models.styles import ParagraphProperties, RunProperties, TabStop, ThemeFonts
 from docxpdf_native.ooxml.namespaces import OoxmlNamespaces
 from docxpdf_native.ooxml.package import OoxmlPackage
+from docxpdf_native.ooxml.raster import RasterImageConverter
 from docxpdf_native.ooxml.styles import OoxmlStylesParser, ParsedStyleSheet, ThemeFontParser
 from docxpdf_native.ooxml.unsupported import (
     LenientUnsupportedFeatureHandler,
@@ -48,6 +52,113 @@ logger = logging.getLogger(__name__)
 
 DocumentSource = Path | str | bytes | BinaryIO
 BlockModel = ParagraphModel | TableModel
+Visual = ImageModel | PlaceholderModel
+
+# VML (``style="width:...;height:...")`` and legacy ``w:dxaOrig``/``w:dyaOrig``
+# lengths are expressed in a handful of CSS-like units; VML's own default unit
+# (a bare number) is points.
+_VML_UNITS_TO_POINTS: dict[str, float] = {
+    "pt": 1.0,
+    "in": 72.0,
+    "cm": 72.0 / 2.54,
+    "mm": 72.0 / 25.4,
+    "px": 0.75,
+    "pc": 12.0,
+}
+_VML_LENGTH_PATTERN = re.compile(r"^\s*(-?[0-9]*\.?[0-9]+)\s*([a-zA-Z%]*)\s*$")
+
+
+class _FieldFrame:
+    """Mutable state for one active ``w:fldChar`` begin/separate/end span."""
+
+    __slots__ = ("instruction", "phase", "result_runs")
+
+    def __init__(self) -> None:
+        self.phase: Literal["instruction", "result"] = "instruction"
+        self.instruction: str = ""
+        self.result_runs: list[RunModel] = []
+
+
+class _FieldTracker:
+    """Track nested complex fields within one paragraph.
+
+    Only the outermost field's cached result is ever emitted.  Anything
+    nested (typically the field's own instruction operands, e.g. the ``PAGE``
+    field inside ``IF { PAGE } = 1 ...``) is discarded, matching how Word
+    itself only bakes the outermost cached result into the visible run
+    stream.
+    """
+
+    def __init__(self) -> None:
+        self._stack: list[_FieldFrame] = []
+
+    @property
+    def depth(self) -> int:
+        return len(self._stack)
+
+    def begin(self) -> None:
+        self._stack.append(_FieldFrame())
+
+    def separate(self) -> None:
+        if self._stack:
+            self._stack[-1].phase = "result"
+
+    def record_instruction(self, text: str) -> None:
+        if self._stack and self._stack[-1].phase == "instruction":
+            self._stack[-1].instruction += text
+
+    def should_buffer_result(self) -> bool:
+        return len(self._stack) == 1 and self._stack[-1].phase == "result"
+
+    def buffer(self, run: RunModel) -> None:
+        self._stack[-1].result_runs.append(run)
+
+    def end(self) -> list[RunModel]:
+        if not self._stack:
+            return []
+        frame = self._stack.pop()
+        if self._stack:
+            return []
+        return self._finalize(frame)
+
+    def flush_incomplete(self) -> list[RunModel]:
+        """Force-close any field left open at the end of a paragraph.
+
+        Complex fields are tracked per paragraph; one that never receives a
+        matching ``end`` (rare, e.g. a field spanning multiple paragraphs)
+        still surfaces whatever result text it had captured so far, rather
+        than silently losing it.
+        """
+
+        if not self._stack:
+            return []
+        while len(self._stack) > 1:
+            self._stack.pop()
+        frame = self._stack.pop()
+        if frame.phase != "result":
+            return []
+        return self._finalize(frame)
+
+    @staticmethod
+    def _finalize(frame: _FieldFrame) -> list[RunModel]:
+        instruction = frame.instruction.strip()
+        command = instruction.split(maxsplit=1)[0].upper() if instruction else ""
+        sentinel = {"PAGE": "{{PAGE}}", "NUMPAGES": "{{NUMPAGES}}"}.get(command)
+        if sentinel is None:
+            return frame.result_runs
+        if frame.result_runs:
+            first = frame.result_runs[0]
+            return [
+                RunModel(
+                    text=sentinel,
+                    style_id=first.style_id,
+                    properties=first.properties,
+                    preserve_space=first.preserve_space,
+                    hidden=first.hidden,
+                    source_index=first.source_index,
+                )
+            ]
+        return [RunModel(text=sentinel)]
 
 
 class _ParseState(BaseModel):
@@ -108,6 +219,8 @@ class OoxmlDocumentParser(DocumentParser):
         self._unsupported_handler = unsupported_handler
         self._warnings: tuple[ConversionWarning, ...] = ()
         self._unsupported_features: tuple[UnsupportedFeature, ...] = ()
+        self._placeholder_features: list[UnsupportedFeature] = []
+        self._placeholder_warnings: list[ConversionWarning] = []
 
     @property
     def warnings(self) -> tuple[ConversionWarning, ...]:
@@ -134,12 +247,17 @@ class OoxmlDocumentParser(DocumentParser):
         """
 
         selected_options = options or ConversionOptions()
+        self._placeholder_features = []
+        self._placeholder_warnings = []
         limits = self._limits or selected_options.resource_limits
         package = OoxmlPackage.open(
             source,
             limits=limits,
-            # External bytes are never fetched.  Retaining relationship metadata
-            # here lets the unsupported-feature policy report a useful error.
+            # External relationships (hyperlinks, external OLE targets, ...)
+            # are common in real-world DOCX files and are always tolerated at
+            # the package level: their target bytes are never fetched, so
+            # merely referencing an external target is not a security or
+            # correctness concern in itself.
             allow_external_relationships=True,
         )
         state = _ParseState(limits=limits)
@@ -166,10 +284,6 @@ class OoxmlDocumentParser(DocumentParser):
             )
         detector = UnsupportedFeatureDetector(handler)
         detector.scan_package(package)
-        self._enforce_external_relationship_policy(
-            package,
-            allow_external=selected_options.allow_external_relationships,
-        )
         detector.scan_element(root, part_name="word/document.xml")
         optional_roots: dict[str, Element] = {}
         for part_name in package.part_names:
@@ -182,12 +296,6 @@ class OoxmlDocumentParser(DocumentParser):
             if part_name != "word/settings.xml":
                 detector.scan_element(optional_root, part_name=part_name)
         self._validate_optional_part_roots(optional_roots)
-        if isinstance(handler, LenientUnsupportedFeatureHandler):
-            self._warnings = handler.warnings
-            self._unsupported_features = handler.features
-        else:
-            self._warnings = ()
-            self._unsupported_features = ()
         body = root.find(OoxmlNamespaces.qn("w", "body"))
         if body is None:
             raise InvalidOoxmlError(
@@ -210,6 +318,18 @@ class OoxmlDocumentParser(DocumentParser):
                 optional_roots.get("docProps/app.xml"),
             )
             source_name = str(source) if isinstance(source, (Path, str)) else None
+            handler_warnings = (
+                handler.warnings if isinstance(handler, LenientUnsupportedFeatureHandler) else ()
+            )
+            handler_features = (
+                handler.features if isinstance(handler, LenientUnsupportedFeatureHandler) else ()
+            )
+            # Placeholder diagnostics are collected while parsing sections above
+            # and always surface, in both strict and lenient mode: a same-size
+            # placeholder is a reported degradation, not a silent one, so it
+            # never blocks strict mode the way a truly unsupported feature does.
+            self._warnings = (*handler_warnings, *self._placeholder_warnings)
+            self._unsupported_features = (*handler_features, *self._placeholder_features)
             return DocumentModel(
                 sections=sections,
                 styles=style_sheet.styles,
@@ -224,23 +344,6 @@ class OoxmlDocumentParser(DocumentParser):
                 f"OOXML value failed model validation: {error.errors(include_url=False)}",
                 part="word/document.xml",
             ) from error
-
-    @staticmethod
-    def _enforce_external_relationship_policy(
-        package: OoxmlPackage,
-        *,
-        allow_external: bool,
-    ) -> None:
-        if allow_external:
-            return
-        for relation_set in package.relationship_sets.values():
-            for relation in relation_set.relationships:
-                if not relation.is_external or relation.relationship_type.endswith("/image"):
-                    continue
-                owner = relation.source_part or "package root"
-                raise RelationshipError(
-                    f"External relationship {relation.relationship_id!r} from {owner!r} is disabled"
-                )
 
     @staticmethod
     def _validate_optional_part_roots(roots: dict[str, Element]) -> None:
@@ -412,7 +515,7 @@ class OoxmlDocumentParser(DocumentParser):
         section_tag = OoxmlNamespaces.qn("w", "sectPr")
         paragraph_properties_tag = OoxmlNamespaces.qn("w", "pPr")
 
-        for child in body:
+        for child in self._flatten_block_children(body):
             if child.tag == paragraph_tag:
                 paragraph = self._parse_paragraph(
                     child,
@@ -529,6 +632,16 @@ class OoxmlDocumentParser(DocumentParser):
                 column_count = self._optional_int(columns, "w", "num") or 1
                 values["columns"] = max(1, column_count)
 
+            doc_grid = properties.find(OoxmlNamespaces.qn("w", "docGrid"))
+            if doc_grid is not None:
+                grid_type = doc_grid.get(OoxmlNamespaces.qn("w", "type"), "default")
+                if grid_type not in {"default", "lines", "linesAndChars", "snapToChars"}:
+                    raise InvalidOoxmlError(f"Invalid docGrid type {grid_type!r}")
+                values["doc_grid_type"] = grid_type
+                line_pitch = self._optional_int(doc_grid, "w", "linePitch")
+                if line_pitch is not None and line_pitch > 0:
+                    values["doc_grid_line_pitch"] = self.twips_to_points(line_pitch)
+
             values["headers"] = self._parse_header_footer_references(
                 properties,
                 package=package,
@@ -602,7 +715,7 @@ class OoxmlDocumentParser(DocumentParser):
         state: _ParseState,
     ) -> tuple[BlockModel, ...]:
         blocks: list[BlockModel] = []
-        for child in root:
+        for child in self._flatten_block_children(root):
             if child.tag == OoxmlNamespaces.qn("w", "p"):
                 blocks.append(
                     self._parse_paragraph(
@@ -623,6 +736,119 @@ class OoxmlDocumentParser(DocumentParser):
                 )
         return tuple(blocks)
 
+    # -- Block-level container flattening -----------------------------------
+    #
+    # ``w:sdt`` (content controls) and ``mc:AlternateContent`` can wrap
+    # ordinary block content (``w:p``/``w:tbl``, possibly nested further).
+    # Flattening them here means every caller that walks block children only
+    # ever sees the real content, never the wrapper, without special-casing
+    # every call site.
+
+    def _flatten_block_children(self, parent: Element) -> Iterator[Element]:
+        for child in parent:
+            yield from self._flatten_block_element(child)
+
+    def _flatten_block_element(self, element: Element) -> Iterator[Element]:
+        if element.tag == OoxmlNamespaces.qn("w", "sdt"):
+            content = element.find(OoxmlNamespaces.qn("w", "sdtContent"))
+            if content is not None:
+                yield from self._flatten_block_children(content)
+            return
+        if element.tag == OoxmlNamespaces.qn("mc", "AlternateContent"):
+            yield from self._flatten_alternate_content(element)
+            return
+        yield element
+
+    def _flatten_alternate_content(self, element: Element) -> Iterator[Element]:
+        # Markup-compatibility fallback: prefer the modern mc:Choice branches
+        # we understand, otherwise render whatever mc:Fallback provides (this
+        # is usually the legacy VML representation of the same drawing).
+        chosen = element.find(OoxmlNamespaces.qn("mc", "Fallback"))
+        if chosen is None:
+            chosen = element.find(OoxmlNamespaces.qn("mc", "Choice"))
+        if chosen is not None:
+            yield from self._flatten_block_children(chosen)
+
+    # -- Inline-level container flattening -----------------------------------
+    #
+    # ``w:hyperlink``, ``w:ins``, ``w:moveTo``, and ``w:smartTag`` wrap runs
+    # transparently (their content should render exactly like an ordinary
+    # run stream).  ``w:del``/``w:moveFrom`` wrap rejected/relocated content
+    # that must not render.  ``w:sdt`` and ``mc:AlternateContent`` reuse the
+    # same unwrapping rules as the block-level case above.  Everything else
+    # (bookmarks, proofing errors, comment anchors, paragraph properties) is
+    # simply not a recognized leaf and is ignored by the caller.
+
+    _TRANSPARENT_INLINE_CONTAINERS = (
+        "hyperlink",
+        "ins",
+        "moveTo",
+        "smartTag",
+    )
+    _DROPPED_INLINE_CONTAINERS = ("del", "moveFrom")
+
+    def _flatten_inline_children(self, parent: Element) -> Iterator[Element]:
+        for child in parent:
+            yield from self._flatten_inline_element(child)
+
+    def _flatten_inline_element(self, element: Element) -> Iterator[Element]:
+        if element.tag in {
+            OoxmlNamespaces.qn("w", name) for name in self._TRANSPARENT_INLINE_CONTAINERS
+        }:
+            yield from self._flatten_inline_children(element)
+            return
+        if element.tag in {
+            OoxmlNamespaces.qn("w", name) for name in self._DROPPED_INLINE_CONTAINERS
+        }:
+            return
+        if element.tag == OoxmlNamespaces.qn("w", "sdt"):
+            content = element.find(OoxmlNamespaces.qn("w", "sdtContent"))
+            if content is not None:
+                yield from self._flatten_inline_children(content)
+            return
+        if element.tag == OoxmlNamespaces.qn("mc", "AlternateContent"):
+            chosen = element.find(OoxmlNamespaces.qn("mc", "Fallback"))
+            if chosen is None:
+                chosen = element.find(OoxmlNamespaces.qn("mc", "Choice"))
+            if chosen is not None:
+                yield from self._flatten_inline_children(chosen)
+            return
+        yield element
+
+    def _record_placeholder(self, *, part_name: str, label: str) -> None:
+        """Record a non-fatal diagnostic for a same-size placeholder.
+
+        Placeholders are always reported, in both strict and lenient mode:
+        the content's footprint is preserved (so pagination matches the
+        source document) but its exact appearance is not, and that
+        degradation should never be silent.
+        """
+
+        location = f"placeholder[{len(self._placeholder_features)}]"
+        feature = UnsupportedFeature(
+            name="content_placeholder",
+            part=part_name,
+            element=label,
+            location=location,
+            status="placeholder",
+            workaround=(
+                "Install the 'images' extra (Pillow) for broader image format "
+                "support, or replace the content with a native PNG/JPEG image."
+            ),
+        )
+        warning = ConversionWarning(
+            code="content_placeholder",
+            message=(
+                f"{label} could not be rendered natively and was replaced by a "
+                "same-size placeholder"
+            ),
+            part=part_name,
+            location=location,
+            feature=feature,
+        )
+        self._placeholder_features.append(feature)
+        self._placeholder_warnings.append(warning)
+
     def _parse_paragraph(
         self,
         element: Element,
@@ -635,67 +861,112 @@ class OoxmlDocumentParser(DocumentParser):
         properties_element = element.find(OoxmlNamespaces.qn("w", "pPr"))
         properties, style_id = self._parse_paragraph_properties(properties_element)
         runs: list[RunModel] = []
-        for child in element:
-            if child.tag == OoxmlNamespaces.qn("w", "r"):
-                runs.extend(
-                    self._parse_run(
-                        child,
-                        package=package,
-                        part_name=part_name,
-                        state=state,
-                    )
+        tracker = _FieldTracker()
+        run_tag = OoxmlNamespaces.qn("w", "r")
+        fld_simple_tag = OoxmlNamespaces.qn("w", "fldSimple")
+        fld_char_tag = OoxmlNamespaces.qn("w", "fldChar")
+        instr_text_tag = OoxmlNamespaces.qn("w", "instrText")
+        for child in self._flatten_inline_children(element):
+            if child.tag == run_tag:
+                field_chars = child.findall(fld_char_tag)
+                if field_chars:
+                    for field_char in field_chars:
+                        field_type = field_char.get(OoxmlNamespaces.qn("w", "fldCharType"), "")
+                        if field_type == "begin":
+                            tracker.begin()
+                        elif field_type == "separate":
+                            tracker.separate()
+                        elif field_type == "end":
+                            runs.extend(tracker.end())
+                    continue
+                instr_texts = child.findall(instr_text_tag)
+                if instr_texts:
+                    for instr_text in instr_texts:
+                        tracker.record_instruction(instr_text.text or "")
+                    continue
+                produced = self._parse_run(
+                    child,
+                    package=package,
+                    part_name=part_name,
+                    state=state,
                 )
-            elif child.tag == OoxmlNamespaces.qn("w", "hyperlink"):
-                for run_element in child.findall(OoxmlNamespaces.qn("w", "r")):
-                    runs.extend(
-                        self._parse_run(
-                            run_element,
-                            package=package,
-                            part_name=part_name,
-                            state=state,
-                        )
-                    )
-            elif child.tag == OoxmlNamespaces.qn("w", "fldSimple"):
-                field_runs: list[RunModel] = []
-                for run_element in child.findall(OoxmlNamespaces.qn("w", "r")):
-                    field_runs.extend(
-                        self._parse_run(
-                            run_element,
-                            package=package,
-                            part_name=part_name,
-                            state=state,
-                        )
-                    )
-                instruction = child.get(OoxmlNamespaces.qn("w", "instr"), "")
-                command = instruction.strip().split(maxsplit=1)[0].upper()
-                sentinel = {"PAGE": "{{PAGE}}", "NUMPAGES": "{{NUMPAGES}}"}.get(command)
-                if sentinel is None:
-                    runs.extend(field_runs)
-                elif field_runs:
-                    first = field_runs[0]
-                    runs.append(
-                        RunModel(
-                            text=sentinel,
-                            style_id=first.style_id,
-                            properties=first.properties,
-                            preserve_space=first.preserve_space,
-                            hidden=first.hidden,
-                            source_index=first.source_index,
-                        )
-                    )
-                else:
-                    runs.append(
-                        RunModel(
-                            text=sentinel,
-                            source_index=state.count_run(part_name=part_name),
-                        )
-                    )
+                self._route_field_content(produced, tracker=tracker, runs=runs)
+            elif child.tag == fld_simple_tag:
+                self._parse_fld_simple(
+                    child,
+                    package=package,
+                    part_name=part_name,
+                    state=state,
+                    runs=runs,
+                )
+        runs.extend(tracker.flush_incomplete())
         return ParagraphModel(
             runs=tuple(runs),
             style_id=style_id,
             properties=properties,
             source_index=paragraph_index,
         )
+
+    @staticmethod
+    def _route_field_content(
+        produced: list[RunModel],
+        *,
+        tracker: _FieldTracker,
+        runs: list[RunModel],
+    ) -> None:
+        if tracker.depth == 0:
+            runs.extend(produced)
+        elif tracker.should_buffer_result():
+            for run in produced:
+                tracker.buffer(run)
+        # else: nested field instruction/result content is discarded, matching
+        # how Word only bakes the outermost field's cached result into view.
+
+    def _parse_fld_simple(
+        self,
+        element: Element,
+        *,
+        package: OoxmlPackage,
+        part_name: str,
+        state: _ParseState,
+        runs: list[RunModel],
+    ) -> None:
+        field_runs: list[RunModel] = []
+        for run_element in element.findall(OoxmlNamespaces.qn("w", "r")):
+            field_runs.extend(
+                self._parse_run(
+                    run_element,
+                    package=package,
+                    part_name=part_name,
+                    state=state,
+                )
+            )
+        instruction = element.get(OoxmlNamespaces.qn("w", "instr"), "")
+        command = instruction.strip().split(maxsplit=1)[0].upper() if instruction.strip() else ""
+        sentinel = {"PAGE": "{{PAGE}}", "NUMPAGES": "{{NUMPAGES}}"}.get(command)
+        if sentinel is None:
+            # Any other field code (DATE, FILENAME, REF, ...) is rendered as
+            # its cached child-run text, exactly as Word last computed it.
+            runs.extend(field_runs)
+        elif field_runs:
+            first = field_runs[0]
+            runs.append(
+                RunModel(
+                    text=sentinel,
+                    style_id=first.style_id,
+                    properties=first.properties,
+                    preserve_space=first.preserve_space,
+                    hidden=first.hidden,
+                    source_index=first.source_index,
+                )
+            )
+        else:
+            runs.append(
+                RunModel(
+                    text=sentinel,
+                    source_index=state.count_run(part_name=part_name),
+                )
+            )
 
     def _parse_paragraph_properties(
         self,
@@ -856,13 +1127,22 @@ class OoxmlDocumentParser(DocumentParser):
             elif child.tag == OoxmlNamespaces.qn("w", "tab"):
                 parsed.append(RunModel(tab=True, **common))
             elif child.tag == OoxmlNamespaces.qn("w", "drawing"):
-                for image in self._parse_inline_images(
-                    child,
-                    package=package,
-                    part_name=part_name,
-                    source_index=run_index,
+                for drawing_visual in self._parse_drawings(
+                    child, package=package, part_name=part_name
                 ):
-                    parsed.append(RunModel(image=image, **common))
+                    parsed.append(self._visual_run(drawing_visual, **common))
+            elif child.tag == OoxmlNamespaces.qn("w", "pict"):
+                pict_visual = self._parse_vml_visual(
+                    child, package=package, part_name=part_name, is_object=False
+                )
+                if pict_visual is not None:
+                    parsed.append(self._visual_run(pict_visual, **common))
+            elif child.tag == OoxmlNamespaces.qn("w", "object"):
+                object_visual = self._parse_vml_visual(
+                    child, package=package, part_name=part_name, is_object=True
+                )
+                if object_visual is not None:
+                    parsed.append(self._visual_run(object_visual, **common))
             else:
                 state.runs -= 1
         if not parsed and len(element) == (1 if properties_element is not None else 0):
@@ -944,58 +1224,224 @@ class OoxmlDocumentParser(DocumentParser):
             values["hidden"] = self._on_off(hidden)
         return RunProperties.model_validate(values), style_id
 
-    def _parse_inline_images(
+    @staticmethod
+    def _visual_run(visual: Visual, **common: object) -> RunModel:
+        if isinstance(visual, ImageModel):
+            return RunModel(image=visual, **common)
+        return RunModel(placeholder=visual, **common)
+
+    @staticmethod
+    def _safe_dimension(value: float) -> float:
+        return value if value > 0 else 0.01
+
+    # -- DrawingML (wp:inline / wp:anchor) -----------------------------------
+
+    def _parse_drawings(
         self,
         drawing: Element,
         *,
         package: OoxmlPackage,
         part_name: str,
-        source_index: int,
-    ) -> tuple[ImageModel, ...]:
-        images: list[ImageModel] = []
-        for inline in drawing.findall(f".//{OoxmlNamespaces.qn('wp', 'inline')}"):
-            extent = inline.find(OoxmlNamespaces.qn("wp", "extent"))
-            blip = inline.find(f".//{OoxmlNamespaces.qn('a', 'blip')}")
-            if extent is None or blip is None:
-                raise InvalidOoxmlError(
-                    "Inline image is missing wp:extent or a:blip",
-                    part=part_name,
-                )
-            relation_id = blip.get(OoxmlNamespaces.qn("r", "embed"))
-            if not relation_id:
-                raise RelationshipError("Inline image has no r:embed", part=part_name)
-            relation = package.relationships_for(part_name).by_id(relation_id)
-            if relation.resolved_target is None:
-                # The package-level detector has already raised in strict mode
-                # or recorded an explicit warning in lenient mode.  Never fetch
-                # external bytes; omit only this unsupported image fragment.
-                continue
-            image_part = relation.resolved_target
-            raw_content_type = package.content_types.for_part(image_part)
-            content_type = "image/jpeg" if raw_content_type == "image/jpg" else raw_content_type
-            if content_type not in {"image/png", "image/jpeg"}:
-                # Package-level feature detection has already applied strict or
-                # lenient policy.  In lenient mode only this image is omitted.
-                continue
-            width = self.emu_to_points(self._required_plain_int(extent, "cx"))
-            height = self.emu_to_points(self._required_plain_int(extent, "cy"))
-            document_properties = inline.find(OoxmlNamespaces.qn("wp", "docPr"))
-            description = None
-            if document_properties is not None:
-                description = document_properties.get("descr") or document_properties.get("title")
-            images.append(
-                ImageModel(
-                    relationship_id=relation_id,
-                    part_name=image_part,
-                    content_type=content_type,
-                    data=package.read_part(image_part),
+    ) -> list[Visual]:
+        elements = [
+            *drawing.findall(f".//{OoxmlNamespaces.qn('wp', 'inline')}"),
+            *drawing.findall(f".//{OoxmlNamespaces.qn('wp', 'anchor')}"),
+        ]
+        visuals: list[Visual] = []
+        for element in elements:
+            visual = self._parse_one_drawing(element, package=package, part_name=part_name)
+            if visual is not None:
+                visuals.append(visual)
+        return visuals
+
+    def _parse_one_drawing(
+        self,
+        element: Element,
+        *,
+        package: OoxmlPackage,
+        part_name: str,
+    ) -> Visual | None:
+        extent = element.find(OoxmlNamespaces.qn("wp", "extent"))
+        if extent is None:
+            # No declared size means no reliable footprint to reserve; skip
+            # rather than guess, this is rare and indicates malformed markup.
+            return None
+        width = self._safe_dimension(self.emu_to_points(self._required_plain_int(extent, "cx")))
+        height = self._safe_dimension(self.emu_to_points(self._required_plain_int(extent, "cy")))
+        document_properties = element.find(OoxmlNamespaces.qn("wp", "docPr"))
+        description = None
+        if document_properties is not None:
+            description = document_properties.get("descr") or document_properties.get("title")
+        blip = element.find(f".//{OoxmlNamespaces.qn('a', 'blip')}")
+        if blip is not None:
+            relation_id = blip.get(OoxmlNamespaces.qn("r", "embed")) or blip.get(
+                OoxmlNamespaces.qn("r", "link")
+            )
+            image = (
+                self._resolve_relationship_image(
+                    relation_id,
+                    package=package,
+                    part_name=part_name,
                     width=width,
                     height=height,
                     description=description,
-                    source_index=source_index,
                 )
+                if relation_id
+                else None
             )
-        return tuple(images)
+            if image is not None:
+                return image
+            self._record_placeholder(part_name=part_name, label="[Image]")
+            return PlaceholderModel(label="[Image]", width=width, height=height)
+        label = self._drawing_placeholder_label(element)
+        self._record_placeholder(part_name=part_name, label=label)
+        return PlaceholderModel(label=label, width=width, height=height)
+
+    @staticmethod
+    def _drawing_placeholder_label(element: Element) -> str:
+        if element.find(f".//{OoxmlNamespaces.qn('c', 'chart')}") is not None:
+            return "[Chart]"
+        if element.find(f".//{OoxmlNamespaces.qn('dgm', 'relIds')}") is not None:
+            return "[SmartArt]"
+        if (
+            element.find(f".//{OoxmlNamespaces.qn('wps', 'txbx')}") is not None
+            or element.find(f".//{OoxmlNamespaces.qn('w', 'txbxContent')}") is not None
+        ):
+            return "[Text Box]"
+        return "[Shape]"
+
+    # -- VML (w:pict / w:object) and embedded OLE objects --------------------
+
+    def _parse_vml_visual(
+        self,
+        container: Element,
+        *,
+        package: OoxmlPackage,
+        part_name: str,
+        is_object: bool,
+    ) -> Visual | None:
+        shape = container.find(f".//{OoxmlNamespaces.qn('v', 'shape')}")
+        if shape is None:
+            return None
+        size = self._parse_vml_style_size(shape.get("style")) or self._vml_fallback_size(container)
+        if size is None:
+            return None
+        width, height = self._safe_dimension(size[0]), self._safe_dimension(size[1])
+        object_label = "[Embedded Object]" if is_object else "[Image]"
+        image_data = shape.find(OoxmlNamespaces.qn("v", "imagedata"))
+        if image_data is not None:
+            relation_id = image_data.get(OoxmlNamespaces.qn("r", "id"))
+            image = (
+                self._resolve_relationship_image(
+                    relation_id,
+                    package=package,
+                    part_name=part_name,
+                    width=width,
+                    height=height,
+                    description=None,
+                )
+                if relation_id
+                else None
+            )
+            if image is not None:
+                return image
+            self._record_placeholder(part_name=part_name, label=object_label)
+            return PlaceholderModel(label=object_label, width=width, height=height)
+        has_textpath = shape.find(f".//{OoxmlNamespaces.qn('v', 'textpath')}") is not None
+        if is_object:
+            label = "[Embedded Object]"
+        elif has_textpath:
+            label = "[WordArt]"
+        else:
+            label = "[Shape]"
+        self._record_placeholder(part_name=part_name, label=label)
+        return PlaceholderModel(label=label, width=width, height=height)
+
+    @staticmethod
+    def _vml_fallback_size(container: Element) -> tuple[float, float] | None:
+        # ``w:object`` may omit a usable VML ``style`` and instead carry the
+        # original object size directly, in twentieths of a point.
+        width = OoxmlDocumentParser._optional_int(container, "w", "dxaOrig")
+        height = OoxmlDocumentParser._optional_int(container, "w", "dyaOrig")
+        if width is None or height is None:
+            return None
+        return (
+            OoxmlDocumentParser.twips_to_points(width),
+            OoxmlDocumentParser.twips_to_points(height),
+        )
+
+    @classmethod
+    def _parse_vml_style_size(cls, style: str | None) -> tuple[float, float] | None:
+        if not style:
+            return None
+        properties: dict[str, str] = {}
+        for declaration in style.split(";"):
+            if ":" not in declaration:
+                continue
+            key, _, raw_value = declaration.partition(":")
+            properties[key.strip().casefold()] = raw_value.strip()
+        width = cls._parse_vml_length(properties.get("width"))
+        height = cls._parse_vml_length(properties.get("height"))
+        if width is None or height is None:
+            return None
+        return width, height
+
+    @staticmethod
+    def _parse_vml_length(value: str | None) -> float | None:
+        if not value:
+            return None
+        match = _VML_LENGTH_PATTERN.fullmatch(value)
+        if match is None:
+            return None
+        number = float(match.group(1))
+        unit = match.group(2).casefold() or "pt"
+        factor = _VML_UNITS_TO_POINTS.get(unit)
+        if factor is None:
+            return None
+        length = number * factor
+        return length if length > 0 else None
+
+    # -- Shared relationship-backed image resolution -------------------------
+
+    def _resolve_relationship_image(
+        self,
+        relation_id: str,
+        *,
+        package: OoxmlPackage,
+        part_name: str,
+        width: float,
+        height: float,
+        description: str | None,
+    ) -> ImageModel | None:
+        try:
+            relation = package.relationships_for(part_name).by_id(relation_id)
+        except RelationshipError:
+            return None
+        if relation.is_external or relation.resolved_target is None:
+            # External bytes are never fetched; the caller falls back to a
+            # dimension-preserving placeholder instead.
+            return None
+        image_part = relation.resolved_target
+        if not package.has_part(image_part):
+            return None
+        raw_content_type = package.content_types.for_part(image_part)
+        content_type = "image/jpeg" if raw_content_type == "image/jpg" else raw_content_type
+        data = package.read_part(image_part)
+        if content_type not in {"image/png", "image/jpeg"}:
+            converted = RasterImageConverter.convert_to_png(data)
+            if converted is None:
+                return None
+            data = converted
+            content_type = "image/png"
+        return ImageModel(
+            relationship_id=relation_id,
+            part_name=image_part,
+            content_type=content_type,
+            data=data,
+            width=width,
+            height=height,
+            description=description,
+        )
 
     def _parse_table(
         self,
@@ -1046,6 +1492,7 @@ class OoxmlDocumentParser(DocumentParser):
                     widths.append(self.twips_to_points(column_width))
             values["grid_widths"] = tuple(widths)
 
+        row_tag = OoxmlNamespaces.qn("w", "tr")
         rows = tuple(
             self._parse_table_row(
                 row,
@@ -1054,7 +1501,8 @@ class OoxmlDocumentParser(DocumentParser):
                 state=state,
                 table_margins=table_margins,
             )
-            for row in element.findall(OoxmlNamespaces.qn("w", "tr"))
+            for row in self._flatten_block_children(element)
+            if row.tag == row_tag
         )
         values["rows"] = rows
         return TableModel.model_validate(values)
@@ -1088,6 +1536,7 @@ class OoxmlDocumentParser(DocumentParser):
             repeat = properties.find(OoxmlNamespaces.qn("w", "tblHeader"))
             if repeat is not None:
                 values["repeat_header"] = self._on_off(repeat)
+        cell_tag = OoxmlNamespaces.qn("w", "tc")
         values["cells"] = tuple(
             self._parse_table_cell(
                 cell,
@@ -1096,7 +1545,8 @@ class OoxmlDocumentParser(DocumentParser):
                 state=state,
                 table_margins=table_margins,
             )
-            for cell in element.findall(OoxmlNamespaces.qn("w", "tc"))
+            for cell in self._flatten_block_children(element)
+            if cell.tag == cell_tag
         )
         return TableRowModel.model_validate(values)
 
@@ -1153,6 +1603,7 @@ class OoxmlDocumentParser(DocumentParser):
                     )
                 values["vertical_alignment"] = raw_alignment
 
+        paragraph_tag = OoxmlNamespaces.qn("w", "p")
         paragraphs = tuple(
             self._parse_paragraph(
                 paragraph,
@@ -1160,7 +1611,8 @@ class OoxmlDocumentParser(DocumentParser):
                 part_name=part_name,
                 state=state,
             )
-            for paragraph in element.findall(OoxmlNamespaces.qn("w", "p"))
+            for paragraph in self._flatten_block_children(element)
+            if paragraph.tag == paragraph_tag
         )
         values["paragraphs"] = paragraphs
         if paragraphs and paragraphs[0].properties.alignment is not None:

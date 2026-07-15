@@ -20,6 +20,7 @@ WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+VML_NS = "urn:schemas-microsoft-com:vml"
 
 PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
@@ -276,7 +277,7 @@ def test_converter_rejects_text_box_in_strict_mode() -> None:
     )
 
     with pytest.raises(UnsupportedFeatureError) as caught:
-        Converter().convert(source)
+        Converter(ConversionOptions(strict=True)).convert(source)
 
     assert caught.value.feature.name == "text_box"
 
@@ -632,3 +633,65 @@ def test_converter_preserves_horizontal_and_vertical_table_merges() -> None:
     extracted = PdfReader(BytesIO(result.pdf_bytes or b"")).pages[0].extract_text()
     for text in ("horizontal merge", "vertical merge", "right first", "right second"):
         assert text in extracted
+
+
+def test_converter_handles_legacy_constructs_with_default_options() -> None:
+    # Default options are lenient: a content control, tracked changes, a
+    # nested-looking complex field, a VML image, and an OLE preview that
+    # cannot be decoded must all convert without raising, with content
+    # preserved and the undecodable object reserved as a placeholder.
+    body_xml = f"""
+      <w:sdt><w:sdtPr/><w:sdtContent>
+        <w:p><w:r><w:t>content control text</w:t></w:r></w:p>
+      </w:sdtContent></w:sdt>
+      <w:p>
+        <w:ins w:id="1" w:author="A"><w:r><w:t>inserted </w:t></w:r></w:ins>
+        <w:del w:id="2" w:author="A"><w:r><w:delText>deleted </w:delText></w:r></w:del>
+        <w:r><w:t>kept</w:t></w:r>
+      </w:p>
+      <w:p>
+        <w:r><w:t>Page </w:t></w:r>
+        <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+        <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+        <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+        <w:r><w:t>1</w:t></w:r>
+        <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      </w:p>
+      <w:p><w:r>
+        <w:pict xmlns:v="{VML_NS}"><v:shape style="width:20pt;height:10pt">
+          <v:imagedata r:id="rIdVml"/></v:shape></w:pict>
+      </w:r></w:p>
+      <w:p><w:r>
+        <w:object xmlns:v="{VML_NS}">
+          <v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rIdOle"/></v:shape>
+        </w:object>
+      </w:r></w:p>
+    """
+    document_relationships = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="{PACKAGE_REL_NS}">
+  <Relationship Id="rIdVml" Type="{R_NS}/image" Target="media/vml-image.png"/>
+  <Relationship Id="rIdOle" Type="{R_NS}/image" Target="media/ole-preview.wmf"/>
+</Relationships>""".encode()
+    source = _minimal_docx(
+        body_xml=body_xml,
+        document_relationships=document_relationships,
+        extra_parts={
+            "word/media/vml-image.png": PNG_1X1,
+            "word/media/ole-preview.wmf": b"not a real wmf",
+        },
+    )
+
+    result = Converter().convert(source)
+
+    assert result.page_count >= 1
+    extracted = PdfReader(BytesIO(result.pdf_bytes or b"")).pages[0].extract_text()
+    assert "content control text" in extracted
+    assert "inserted" in extracted
+    assert "deleted" not in extracted
+    assert "kept" in extracted
+    placeholder_warnings = [
+        warning for warning in result.warnings if warning.code == "content_placeholder"
+    ]
+    assert len(placeholder_warnings) == 1
+    assert placeholder_warnings[0].feature is not None
+    assert placeholder_warnings[0].feature.element == "[Embedded Object]"

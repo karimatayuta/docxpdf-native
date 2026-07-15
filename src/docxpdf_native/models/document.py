@@ -30,6 +30,20 @@ class ImageModel(FrozenModel):
     source_index: int = Field(default=0, ge=0)
 
 
+class PlaceholderModel(FrozenModel):
+    """A same-size stand-in for content that cannot be rendered natively.
+
+    Used for embedded objects, EMF/WMF previews, unrecognized drawings, and
+    other constructs whose exact appearance is out of scope but whose page
+    footprint must still be reserved so pagination matches the source DOCX.
+    """
+
+    label: str
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    source_index: int = Field(default=0, ge=0)
+
+
 class RunModel(FrozenModel):
     text: str = ""
     style_id: str | None = None
@@ -37,6 +51,7 @@ class RunModel(FrozenModel):
     break_type: Literal["line", "page"] | None = None
     tab: bool = False
     image: ImageModel | None = None
+    placeholder: PlaceholderModel | None = None
     preserve_space: bool = False
     hidden: bool = False
     source_index: int = Field(default=0, ge=0)
@@ -49,10 +64,13 @@ class RunModel(FrozenModel):
                 self.break_type is not None,
                 self.tab,
                 self.image is not None,
+                self.placeholder is not None,
             )
         )
         if content_kinds > 1:
-            raise ValueError("a run may contain only one of text, break, tab, or image")
+            raise ValueError(
+                "a run may contain only one of text, break, tab, image, or placeholder"
+            )
         return self
 
 
@@ -172,6 +190,8 @@ class SectionModel(FrozenModel):
     headers: tuple[HeaderFooterModel, ...] = ()
     footers: tuple[HeaderFooterModel, ...] = ()
     columns: int = Field(default=1, ge=1)
+    doc_grid_type: Literal["default", "lines", "linesAndChars", "snapToChars"] = "default"
+    doc_grid_line_pitch: float | None = Field(default=None, gt=0)
     source_index: int = Field(default=0, ge=0)
 
 
@@ -201,6 +221,7 @@ class ResolvedRunModel(FrozenModel):
     break_type: Literal["line", "page"] | None = None
     tab: bool = False
     image: ImageModel | None = None
+    placeholder: PlaceholderModel | None = None
     hidden: bool = False
     source_index: int = Field(default=0, ge=0)
 
@@ -240,6 +261,8 @@ class ResolvedSectionModel(FrozenModel):
     section_break: Literal["continuous", "next_page", "even_page", "odd_page"] = "next_page"
     headers: tuple[HeaderFooterModel, ...] = ()
     footers: tuple[HeaderFooterModel, ...] = ()
+    doc_grid_type: Literal["default", "lines", "linesAndChars", "snapToChars"] = "default"
+    doc_grid_line_pitch: float | None = Field(default=None, gt=0)
     source_index: int = Field(default=0, ge=0)
 
 

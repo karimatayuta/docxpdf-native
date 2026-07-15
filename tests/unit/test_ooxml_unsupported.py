@@ -62,23 +62,16 @@ def build_package(
         (f'<w:root xmlns:w="{W}"><w:txbxContent/></w:root>', "text_box"),
         (f'<w:root xmlns:w="{W}" xmlns:dgm="{DGM}"><dgm:relIds/></w:root>', "smart_art"),
         (f'<w:root xmlns:w="{W}" xmlns:c="{C}"><c:chart/></w:root>', "chart"),
-        (f'<w:root xmlns:w="{W}"><w:object/></w:root>', "embedded_object"),
-        (f'<w:root xmlns:w="{W}" xmlns:o="{O_NS}"><o:OLEObject/></w:root>', "ole"),
         (f'<w:root xmlns:w="{W}" xmlns:m="{M}"><m:oMath/></w:root>', "math"),
         (f'<w:root xmlns:w="{W}" xmlns:v="{V}"><v:textpath/></w:root>', "word_art"),
-        (f'<w:root xmlns:w="{W}" xmlns:v="{V}"><v:shape/></w:root>', "floating_shape"),
-        (f'<w:root xmlns:w="{W}" xmlns:wp="{WP}"><wp:anchor/></w:root>', "anchor_image"),
         (f'<w:root xmlns:w="{W}"><w:textDirection w:val="tbRl"/></w:root>', "vertical_writing"),
         (f'<w:root xmlns:w="{W}"><w:ruby/></w:root>', "ruby"),
         (f'<w:root xmlns:w="{W}"><w:bidi/></w:root>', "bidirectional_layout"),
         (f'<w:root xmlns:w="{W}"><w:cs/></w:root>', "complex_arabic_shaping"),
-        (f'<w:root xmlns:w="{W}"><w:ins/></w:root>', "tracked_changes"),
         (f'<w:root xmlns:w="{W}"><w:commentReference/></w:root>', "comments"),
-        (f'<w:root xmlns:w="{W}"><w:sdt/></w:root>', "content_control"),
         (f'<w:root xmlns:w="{W}"><w:cols w:num="2"/></w:root>', "multiple_columns"),
         (f'<w:root xmlns:w="{W}"><w:footnoteReference/></w:root>', "footnotes"),
         (f'<w:root xmlns:w="{W}"><w:endnoteReference/></w:root>', "endnotes"),
-        (f'<w:root xmlns:w="{W}"><w:fldChar w:fldCharType="begin"/></w:root>', "complex_field"),
     ],
 )
 def test_lenient_detector_records_each_named_unsupported_feature(
@@ -91,6 +84,40 @@ def test_lenient_detector_records_each_named_unsupported_feature(
     detector.scan_element(ElementTree.fromstring(xml), part_name="word/document.xml")
 
     assert handler.features[0].name == feature_name
+
+
+@pytest.mark.parametrize(
+    "xml",
+    [
+        # Content controls are transparently flattened by the parser, not
+        # dropped, so they are no longer reported as unsupported.
+        f'<w:root xmlns:w="{W}"><w:sdt/></w:root>',
+        # Tracked changes render (w:ins) or are dropped (w:del) by the
+        # parser, matching an accepted-changes view of the document.
+        f'<w:root xmlns:w="{W}"><w:ins/></w:root>',
+        f'<w:root xmlns:w="{W}"><w:del/></w:root>',
+        f'<w:root xmlns:w="{W}"><w:moveFrom/></w:root>',
+        f'<w:root xmlns:w="{W}"><w:moveTo/></w:root>',
+        # Complex fields render their cached result text (or a PAGE/NUMPAGES
+        # sentinel) via the parser's field tracker.
+        f'<w:root xmlns:w="{W}"><w:fldChar w:fldCharType="begin"/></w:root>',
+        f'<w:root xmlns:w="{W}"><w:instrText>PAGE</w:instrText></w:root>',
+        # Embedded objects and VML shapes/anchors now resolve to a rendered
+        # image or a same-size placeholder, reported through the parser's own
+        # placeholder diagnostics instead of this pre-scan.
+        f'<w:root xmlns:w="{W}"><w:object/></w:root>',
+        f'<w:root xmlns:w="{W}" xmlns:o="{O_NS}"><o:OLEObject/></w:root>',
+        f'<w:root xmlns:w="{W}" xmlns:v="{V}"><v:shape/></w:root>',
+        f'<w:root xmlns:w="{W}" xmlns:v="{V}"><v:group/></w:root>',
+        f'<w:root xmlns:w="{W}" xmlns:wp="{WP}"><wp:anchor/></w:root>',
+    ],
+)
+def test_detector_no_longer_flags_features_the_parser_now_handles(xml: str) -> None:
+    handler = LenientUnsupportedFeatureHandler()
+
+    UnsupportedFeatureDetector(handler).scan_element(ElementTree.fromstring(xml), part_name="d")
+
+    assert handler.features == ()
 
 
 def test_strict_handler_raises_contextual_error() -> None:
@@ -140,20 +167,21 @@ def test_detector_allows_simple_page_fields() -> None:
     assert handler.features == ()
 
 
-def test_detector_rejects_other_simple_fields() -> None:
+def test_detector_allows_any_simple_field_instruction() -> None:
+    # w:fldSimple is always rendered as its cached child-run text by the
+    # parser, regardless of the instruction, so it is never flagged here.
     root = ElementTree.fromstring(f'<w:root xmlns:w="{W}"><w:fldSimple w:instr=" DATE "/></w:root>')
     handler = LenientUnsupportedFeatureHandler()
 
     UnsupportedFeatureDetector(handler).scan_element(root, part_name="word/header1.xml")
 
-    assert handler.features[0].name == "complex_field"
+    assert handler.features == ()
 
 
 @pytest.mark.parametrize(
     ("part_name", "feature_name"),
     [
         ("word/vbaProject.bin", "macro"),
-        ("word/embeddings/object1.bin", "embedded_object"),
         ("word/charts/chart1.xml", "chart"),
         ("word/diagrams/data1.xml", "smart_art"),
     ],
@@ -171,6 +199,18 @@ def test_detector_reports_unsupported_package_parts(
     assert handler.features[0].part == part_name
 
 
+def test_detector_no_longer_flags_embedded_object_binaries() -> None:
+    # word/embeddings/*.bin is only ever referenced through a w:object the
+    # parser already resolves to an image or a placeholder; the raw binary
+    # part itself is never opened, so it is no longer pre-scanned here.
+    package = build_package(extra_parts={"word/embeddings/oleObject1.bin": b"ole"})
+    handler = LenientUnsupportedFeatureHandler()
+
+    UnsupportedFeatureDetector(handler).scan_package(package)
+
+    assert handler.features == ()
+
+
 def test_detector_ignores_note_and_comment_parts_without_references() -> None:
     package = build_package(
         extra_parts={
@@ -186,7 +226,10 @@ def test_detector_ignores_note_and_comment_parts_without_references() -> None:
     assert handler.features == ()
 
 
-def test_detector_reports_external_link_image_without_fetching() -> None:
+def test_detector_no_longer_scans_image_relationships() -> None:
+    # Non-PNG/JPEG and external image relationships are now resolved (or
+    # placeholder-substituted) by the parser itself; this pre-scan no longer
+    # inspects image relationships at all.
     relationship = (
         f'<Relationship Id="rId9" Type="{R}/image" '
         'Target="https://example.invalid/image.png" TargetMode="External"/>'
@@ -196,5 +239,4 @@ def test_detector_reports_external_link_image_without_fetching() -> None:
 
     UnsupportedFeatureDetector(handler).scan_package(package)
 
-    assert handler.features[0].name == "external_image"
-    assert handler.features[0].location == "relationship:rId9"
+    assert handler.features == ()

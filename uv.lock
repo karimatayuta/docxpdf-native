@@ -180,15 +180,20 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "pillow" },
     { name = "pypdf" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+images = [
+    { name = "pillow" },
+]
 
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "pillow" },
     { name = "pypdf" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -199,6 +204,8 @@ dev = [
 requires-dist = [
     { name = "fonttools", specifier = ">=4.55" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14" },
+    { name = "pillow", marker = "extra == 'dev'", specifier = ">=11.0" },
+    { name = "pillow", marker = "extra == 'images'", specifier = ">=11.0" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pypdf", marker = "extra == 'dev'", specifier = ">=5.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
@@ -206,11 +213,12 @@ requires-dist = [
     { name = "reportlab", specifier = ">=4.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["images", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = ">=1.14" },
+    { name = "pillow", specifier = ">=11.0" },
     { name = "pypdf", specifier = ">=5.1" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-cov", specifier = ">=6.0" },

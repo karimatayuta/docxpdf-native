@@ -19,6 +19,7 @@ from docxpdf_native.models import (
     LineBox,
     PageModel,
     ParagraphBox,
+    PlaceholderBox,
     TableBorders,
     TableBox,
     TextFragment,
@@ -649,6 +650,45 @@ def test_reportlab_backend_draws_page_level_image_box() -> None:
     reader = PdfReader(BytesIO(rendered))
     operations = ContentStream(reader.pages[0].get_contents(), reader).operations
     assert len([values for values, op in operations if op == b"Do"]) == 1
+
+
+def test_reportlab_backend_draws_page_level_placeholder_box_without_raising() -> None:
+    placeholder = PlaceholderBox(
+        x=90,
+        y=100,
+        width=72,
+        height=36,
+        label="[Embedded Object]",
+    )
+    layout = LayoutDocument(
+        pages=(PageModel(number=1, width=595.28, height=841.89, body=(placeholder,)),)
+    )
+
+    rendered = ReportLabPdfBackend().render(layout)
+
+    reader = PdfReader(BytesIO(rendered))
+    operations = ContentStream(reader.pages[0].get_contents(), reader).operations
+    # The placeholder is drawn as a filled/stroked rectangle plus a short
+    # label, never as an embedded image.
+    assert any(op == b"re" for _, op in operations)
+    assert not any(op == b"Do" for _, op in operations)
+    assert "[Embedded Object]" in (reader.pages[0].extract_text() or "")
+
+
+def test_reportlab_backend_draws_placeholder_box_inside_table_cells() -> None:
+    placeholder = PlaceholderBox(x=8, y=8, width=20, height=10, label="[Image]")
+    cell = CellBox(
+        x=0, y=0, width=40, height=20, row_index=0, column_index=0, blocks=(placeholder,)
+    )
+    table = TableBox(
+        x=0, y=0, width=40, height=20, cells=(cell,), column_widths=(40,), row_heights=(20,)
+    )
+    layout = LayoutDocument(pages=(PageModel(number=1, width=200, height=200, body=(table,)),))
+
+    rendered = ReportLabPdfBackend().render(layout)
+
+    reader = PdfReader(BytesIO(rendered))
+    assert "[Image]" in (reader.pages[0].extract_text() or "")
 
 
 def test_reportlab_backend_writes_returned_bytes_to_path(tmp_path: Path) -> None:

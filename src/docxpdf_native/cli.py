@@ -50,7 +50,7 @@ class _CliArguments(FrozenModel):
     output: Path
     font_dirs: tuple[Path, ...] = ()
     font_substitutions: tuple[tuple[str, str], ...] = ()
-    strict: bool = True
+    strict: bool = False
     deterministic: bool = True
     diagnostics: Path | None = None
     layout_json: Path | None = None
@@ -112,15 +112,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--strict",
         dest="strict",
         action="store_true",
-        help="fail on unsupported content",
+        help="fail the moment any content would not render with full fidelity",
     )
     mode.add_argument(
         "--lenient",
         dest="strict",
         action="store_false",
-        help="convert supported content and report warnings",
+        help=(
+            "convert everything possible, replacing unrenderable content with "
+            "same-size placeholders and reporting warnings (default)"
+        ),
     )
-    parser.set_defaults(strict=True)
+    parser.set_defaults(strict=False)
     parser.add_argument(
         "--deterministic",
         action="store_true",
